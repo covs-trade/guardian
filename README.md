@@ -4,7 +4,9 @@ Private signing service for the Cove app. Deploy this repository as a separate s
 
 ## Local regtest
 
-Start local PostgreSQL on port 5432 and Bitcoin Core regtest RPC on port 18443 (`user`/`pass`). Then run `pnpm install` and `pnpm dev:regtest`. This builds the Rust executable and starts Guardian on port 4391 with the public regtest test key and bundled `regtest` TOML profile. Check it with `curl -H 'Authorization: Bearer local-dev' http://127.0.0.1:4391/health`.
+Keep this repository beside the `covedao` repository. From `../covedao`, run `pnpm dev:infra` and `pnpm dev:guardian:docker`. Docker Compose builds this repository and runs Guardian beside local PostgreSQL and Bitcoin Core. Guardian uses the public regtest test key and bundled `regtest` TOML profile on port 4391. Check it with `curl -H 'Authorization: Bearer local-dev' http://127.0.0.1:4391/health`. To stop it, run `docker compose --profile guardian stop guardian` from `../covedao`.
+
+For a direct process outside Docker, start PostgreSQL on port 5432 and Bitcoin Core regtest RPC on port 18443 (`user`/`pass`), then run `pnpm install` and `pnpm dev:regtest` here.
 
 The app uses its in-process signer on regtest, so this separate service is optional for normal local app testing. The health check exercises this service against local PostgreSQL and Bitcoin Core. The app uses the remote Guardian over HTTP on mainnet.
 
