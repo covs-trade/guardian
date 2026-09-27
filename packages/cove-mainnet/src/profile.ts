@@ -383,8 +383,7 @@ function strArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((v) => String(v));
 }
-export function parseMainnetProfileJson(text: string): MainnetProfile {
-  const raw = JSON.parse(text) as Record<string, unknown>;
+export function parseMainnetProfile(raw: Record<string, unknown>): MainnetProfile {
   assertNoUnknownKeys(raw, PROFILE_KEYS, "profile");
   const r = (raw.recovery ?? {}) as Record<string, unknown>;
   const c = (raw.canary ?? {}) as Record<string, unknown>;
@@ -450,6 +449,10 @@ export function parseMainnetProfileJson(text: string): MainnetProfile {
   };
   return profile;
 }
+export function parseMainnetProfileJson(text: string): MainnetProfile {
+  return parseMainnetProfile(JSON.parse(text) as Record<string, unknown>);
+}
+
 export function loadMainnetProfile(
   path: string,
   opts: ValidateMainnetProfileOptions = {},

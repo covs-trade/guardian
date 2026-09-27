@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { resolveGuardianBoot } from "./boot.js";
 const FIXTURE = resolve(
   process.cwd(),
-  "../../test/fixtures/mainnet-profile.json",
+  "../../packages/cove-mainnet/profiles.toml",
 );
 const BASE = {
   COVE_DATABASE_URL: "postgres://x",
@@ -35,6 +35,12 @@ describe("Guardian boot (env)", () => {
       resolveGuardianBoot({ ...env, GUARDIAN_AUTH_TOKEN: "" }),
     ).toThrow(/GUARDIAN_AUTH_TOKEN/);
   });
+  it("rejects invalid env and unsupported network profiles before service construction", () => {
+    expect(() => resolveGuardianBoot({ ...BASE, COVE_NETWORK: "regtest", COVE_V3_CANARY_ACTIVE: "maybe" })).toThrow(/COVE_V3_CANARY_ACTIVE/);
+    expect(() => resolveGuardianBoot({ ...BASE, COVE_NETWORK: "regtest", COVE_BITCOIN_RPC_URL: "bad-url" })).toThrow(/COVE_BITCOIN_RPC_URL/);
+    expect(() => resolveGuardianBoot({ ...BASE, COVE_NETWORK: "regtest", GUARDIAN_TEST_KEY_HEX: "zz" })).toThrow(/GUARDIAN_TEST_KEY_HEX/);
+    expect(() => resolveGuardianBoot({ ...BASE, COVE_NETWORK: "signet" })).toThrow(/profiles.toml has no signet profile/);
+  });
   it("regtest CI: test profile + test key", () => {
     const boot = resolveGuardianBoot({
       ...BASE,
@@ -47,14 +53,14 @@ describe("Guardian boot (env)", () => {
     expect(boot.profile.source).toBe("test-only");
     expect(boot.port).toBe(4391);
   });
-  it("the committed (mainnet) profile forces the mainnet guard: refused under another network", () => {
+  it("regtest selects the bundled regtest profile", () => {
     expect(() =>
       resolveGuardianBoot({
         ...BASE,
         COVE_NETWORK: "regtest",
         GUARDIAN_TEST_KEY_HEX: "42".repeat(32),
       }),
-    ).toThrow(/committed profile is for bitcoin-mainnet/);
+    ).not.toThrow();
   });
   it("mainnet: key required, test key and test profile refused", () => {
     const env = { ...BASE, COVE_NETWORK: "mainnet" };

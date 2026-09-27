@@ -1,14 +1,10 @@
 import * as bitcoin from "bitcoinjs-lib";
 import * as ecc from "tiny-secp256k1";
-import { resolve } from "node:path";
 import { ECPairFactory, type ECPairInterface } from "ecpair";
 import { CoreRpcProvider } from "@crclaunch/bitcoin";
 import { CoveChainView, TOKEN_CARRIER_SATS } from "@crclaunch/cove-covenant";
 import { CHAIN_BITCOIN_REGTEST, COVE_POLICY_V3 } from "@crclaunch/cove-wire";
-import {
-  loadMainnetProfile,
-  hashMainnetProfile,
-} from "@crclaunch/cove-mainnet";
+import { resolveMainnetProfile } from "@crclaunch/cove-mainnet";
 import type { VaultRecoveryProfile } from "@crclaunch/cove-vault";
 import {
   LocalGuardianTransitionSigner,
@@ -39,11 +35,6 @@ const ECPair = ECPairFactory(ecc);
 const RPC_URL = process.env.COVE_REGTEST_RPC_URL ?? "http://127.0.0.1:18443";
 const RPC_USER = process.env.COVE_REGTEST_RPC_USER ?? "user";
 const RPC_PASSWORD = process.env.COVE_REGTEST_RPC_PASSWORD ?? "pass";
-const PROFILE_PATH = resolve(
-  process.env.INIT_CWD ?? process.cwd(),
-  process.env.COVE_TEST_ONLY_PROFILE_PATH ??
-    "test/fixtures/mainnet-profile.json",
-);
 const MINER_FEE = 1000n;
 const NONCE = Buffer.alloc(32, 0xab);
 const MINT_AMOUNT = 1000000n * 100000000n;
@@ -191,14 +182,15 @@ async function main(): Promise<void> {
   await rpc.createWallet("cove-recovery");
   const mineAddr = await rpc.getNewAddress();
   await rpc.generateToAddress(101, mineAddr);
-  const { profile, validation } = loadMainnetProfile(PROFILE_PATH, {
-    allowTestKeys: true,
+  const { profile, validation, profileHash } = resolveMainnetProfile({
+    network: "regtest",
+    testOnlyPath: process.env.COVE_TEST_ONLY_PROFILE_PATH,
+    baseDir: process.env.INIT_CWD ?? process.cwd(),
   });
   assert(
     validation.ok,
     `fixture profile invalid: ${validation.errors.join("; ")}`,
   );
-  const profileHash = hashMainnetProfile(profile);
   assert(
     profile.guardianXOnly != null && profile.feeScript != null,
     "profile incomplete",

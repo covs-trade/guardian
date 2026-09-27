@@ -1,46 +1,41 @@
-import { resolve as resolvePath } from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { parse as parseToml } from "smol-toml";
 import * as bitcoin from "bitcoinjs-lib";
 import {
-  loadMainnetProfile,
-  parseMainnetProfileJson,
+  parseMainnetProfile,
   validateMainnetProfile,
   hashMainnetProfile,
   type MainnetProfile,
   type MainnetProfileValidationResult,
 } from "./profile.js";
-export const COMMITTED_MAINNET_PROFILE_JSON = `{
-  "profileVersion": 1,
-  "chainIdentity": "bitcoin-mainnet",
-  "activationHeight": null,
-  "guardianXOnly": null,
-  "recovery": {
-    "threshold": 1,
-    "csvBlocks": null,
-    "pubkeys": []
-  },
-  "feeScript": null,
-  "buyFeeBps": null,
-  "redeemFeeBps": null,
-  "p2pFeeBps": null,
-  "canary": {
-    "allowedWalletScripts": [],
-    "allowedTokenIds": [],
-    "maxBackingSats": null,
-    "maxSingleBuySats": "200000",
-    "maxSingleRedeemPayoutSats": null,
-    "maxP2pSettlementSats": null,
-    "maxMintAtoms": "2100000000000000",
-    "minMintGrossSats": "5000"
-  },
-  "policyVersion": 3,
-  "vaultProfileVersion": "COVE_V3_VAULT_PROFILE_MAINNET1",
-  "carrierSats": "1000",
-  "anchorSats": "10000",
-  "maxProtocolSupplyAtoms": "2100000000000000",
-  "reserveAllocationAtoms": "0",
-  "mintCmr": "7fb27adf2db5458882daf976ba9325815f111b2f3b16eedb72e75f96de4269b2",
-  "redeemCmr": "37e681b3e70a34acc3b38680c06fbe4f1b2799bede2607c6c9ed7fcac8c95d56"
-}`;
+function bundledProfilesPath(): string {
+  let directory = process.cwd();
+  for (let depth = 0; depth < 6; depth++) {
+    const path = resolvePath(directory, "packages/cove-mainnet/profiles.toml");
+    if (existsSync(path)) return path;
+    directory = dirname(directory);
+  }
+  throw new Error("packages/cove-mainnet/profiles.toml is missing");
+}
+
+export const MAINNET_PROFILES_PATH = bundledProfilesPath();
+
+function profileFromToml(text: string, network: string): MainnetProfile {
+  const document = parseToml(text) as Record<string, unknown>;
+  const protocol = document.protocol as Record<string, unknown> | undefined;
+  const networks = document.networks as Record<string, unknown> | undefined;
+  const selected = networks?.[network] as Record<string, unknown> | undefined;
+  if (!protocol || !selected) {
+    throw new Error(`profiles.toml has no ${network} profile`);
+  }
+  return parseMainnetProfile({ ...protocol, ...selected });
+}
+
+function bundledProfile(network: string): MainnetProfile {
+  return profileFromToml(readFileSync(MAINNET_PROFILES_PATH, "utf8"), network);
+}
+
 export interface CommittedMainnetProfile {
   profile: MainnetProfile;
   validation: MainnetProfileValidationResult;
@@ -66,7 +61,7 @@ export function committedMainnetProfile(
     feeAddress?: string;
   } = {},
 ): CommittedMainnetProfile {
-  const profile = parseMainnetProfileJson(COMMITTED_MAINNET_PROFILE_JSON);
+  const profile = bundledProfile("mainnet");
   if (opts.feeAddress)
     profile.feeScript = feeScriptFromAddress(
       opts.feeAddress,
@@ -88,27 +83,31 @@ export function resolveMainnetProfile(params: {
   baseDir?: string;
   feeAddress?: string;
 }): ResolvedMainnetProfile {
-  if (!params.testOnlyPath) {
-    return {
-      ...committedMainnetProfile({ feeAddress: params.feeAddress }),
-      source: "committed",
-    };
+  if (params.testOnlyPath && params.network === "mainnet") {
+    throw new Error(`${TEST_ONLY_PROFILE_ENV} is refused on mainnet: mainnet runs only the committed profile`);
   }
-  if (params.network === "mainnet") {
-    throw new Error(
-      `${TEST_ONLY_PROFILE_ENV} is refused on mainnet: mainnet runs only the committed profile`,
-    );
+  const selectedNetwork = params.network === "tooling"
+    ? params.testOnlyPath ? "regtest" : "mainnet"
+    : params.network;
+  const profile = params.testOnlyPath
+    ? profileFromToml(
+        readFileSync(
+          params.baseDir
+            ? resolvePath(params.baseDir, params.testOnlyPath)
+            : params.testOnlyPath,
+          "utf8",
+        ),
+        selectedNetwork,
+      )
+    : bundledProfile(selectedNetwork);
+  if (selectedNetwork === "mainnet" && params.feeAddress) {
+    profile.feeScript = feeScriptFromAddress(params.feeAddress, bitcoin.networks.bitcoin);
   }
-  const path = params.baseDir
-    ? resolvePath(params.baseDir, params.testOnlyPath)
-    : params.testOnlyPath;
-  const { profile, validation } = loadMainnetProfile(path, {
-    allowTestKeys: true,
-  });
+  const testOnly = selectedNetwork !== "mainnet";
   return {
     profile,
-    validation,
+    validation: validateMainnetProfile(profile, { allowTestKeys: testOnly }),
     profileHash: hashMainnetProfile(profile),
-    source: "test-only",
+    source: testOnly ? "test-only" : "committed",
   };
 }
