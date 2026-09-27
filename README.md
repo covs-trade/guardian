@@ -2,6 +2,12 @@
 
 Private signing service for the Cove app. Deploy this repository as a separate service in the same Railway project as the app and PostgreSQL database. Do not assign a public domain to the service.
 
+## Local regtest
+
+Start local PostgreSQL and Bitcoin Core from the `covedao` repository with `pnpm dev:infra`. Then, in this repository, run `pnpm install` and `pnpm dev:regtest`. This builds the Rust executable and starts Guardian on port 4391 with the public regtest test key and bundled test profile. Check it with `curl -H 'Authorization: Bearer local-dev' http://127.0.0.1:4391/health`.
+
+The `covedao` web app uses its in-process signer on regtest, so starting this service is optional for normal local app testing. The health check exercises the separate Guardian process against the same local PostgreSQL and Bitcoin Core. The app uses the remote Guardian over HTTP on mainnet.
+
 ## Run
 
 Use Node 20 or newer, pnpm 10.33.0, Rust, PostgreSQL, Bitcoin Core RPC, and an ord endpoint. Run `pnpm install`, `pnpm build:rust`, then `pnpm start`. Run `pnpm typecheck`, `pnpm lint`, and `pnpm test` to check the source. Apply the shared database migrations with `DATABASE_URL=<database-url> pnpm db:migrate` before starting the service.

@@ -8,6 +8,7 @@
   "scripts": {
     "start": "pnpm --filter @crclaunch/guardian start",
     "dev": "pnpm --filter @crclaunch/guardian dev",
+    "dev:regtest": "pnpm build:rust && COVE_NETWORK=regtest COVE_TEST_ONLY_PROFILE_PATH=../../test/fixtures/mainnet-profile.json GUARDIAN_TEST_KEY_HEX=4242424242424242424242424242424242424242424242424242424242424242 GUARDIAN_KEY_HEX= GUARDIAN_AUTH_TOKEN=local-dev COVE_DATABASE_URL=postgres://cove:cove@127.0.0.1:5432/cove COVE_BITCOIN_RPC_URL=http://127.0.0.1:18443 COVE_BITCOIN_RPC_USER=user COVE_BITCOIN_RPC_PASSWORD=pass COVE_FEE_ADDRESS= pnpm start",
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
     "test": "pnpm --filter @crclaunch/guardian test",
