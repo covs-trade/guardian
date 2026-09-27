@@ -4,13 +4,13 @@ Private signing service for the Cove app. Deploy this repository as a separate s
 
 ## Local regtest
 
-Start local PostgreSQL and Bitcoin Core from the `covedao` repository with `pnpm dev:infra`. Then, in this repository, run `pnpm install` and `pnpm dev:regtest`. This builds the Rust executable and starts Guardian on port 4391 with the public regtest test key and bundled test profile. Check it with `curl -H 'Authorization: Bearer local-dev' http://127.0.0.1:4391/health`.
+Start local PostgreSQL on port 5432 and Bitcoin Core regtest RPC on port 18443 (`user`/`pass`). Then run `pnpm install` and `pnpm dev:regtest`. This builds the Rust executable and starts Guardian on port 4391 with the public regtest test key and bundled test profile. Check it with `curl -H 'Authorization: Bearer local-dev' http://127.0.0.1:4391/health`.
 
-The `covedao` web app uses its in-process signer on regtest, so starting this service is optional for normal local app testing. The health check exercises the separate Guardian process against the same local PostgreSQL and Bitcoin Core. The app uses the remote Guardian over HTTP on mainnet.
+The app uses its in-process signer on regtest, so this separate service is optional for normal local app testing. The health check exercises this service against local PostgreSQL and Bitcoin Core. The app uses the remote Guardian over HTTP on mainnet.
 
 ## Run
 
-Use Node 20 or newer, pnpm 10.33.0, Rust, PostgreSQL, Bitcoin Core RPC, and an ord endpoint. Run `pnpm install`, `pnpm build:rust`, then `pnpm start`. Run `pnpm typecheck`, `pnpm lint`, and `pnpm test` to check the source. Apply the shared database migrations with `DATABASE_URL=<database-url> pnpm db:migrate` before starting the service.
+Use Node 20 or newer, pnpm 10.33.0, Rust, PostgreSQL, and Bitcoin Core RPC. On mainnet the committed ord endpoint is `https://ordinals.com`; signing requests with funding inputs fail closed if it is unavailable. Run `pnpm install`, `pnpm build:rust`, then `pnpm start`. Run `pnpm typecheck`, `pnpm lint`, and `pnpm test` to check the source. Apply the shared database migrations with `DATABASE_URL=<database-url> pnpm db:migrate` before starting the service.
 
 For Railway, deploy the included Dockerfile. Set the variables in `.env.example` as Railway service variables. Set `COVE_DATABASE_URL` to the same PostgreSQL database used by the app and worker. Set `GUARDIAN_AUTH_TOKEN` to the same value the app uses as `COVE_GUARDIAN_AUTH_TOKEN`. Set `COVE_FEE_ADDRESS` to the same address as the app and worker. Keep `GUARDIAN_KEY_HEX` only in the Guardian service. Keep the recovery key offline. The app calls `http://<guardian-service>.railway.internal:4391` through Railway private networking.
 
