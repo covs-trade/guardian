@@ -1,0 +1,1 @@
+export const RESERVE_ANCHOR_SATS = 10000n;

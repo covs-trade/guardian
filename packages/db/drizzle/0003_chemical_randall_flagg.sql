@@ -1,0 +1,1 @@
+ALTER TABLE "cove_cursor" ADD COLUMN "rebuilding" boolean DEFAULT false NOT NULL;

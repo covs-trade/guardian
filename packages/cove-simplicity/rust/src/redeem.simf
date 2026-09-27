@@ -1,0 +1,32 @@
+
+
+
+
+
+
+
+
+
+
+
+
+fn main() {
+    let amount: u64 = witness::AMOUNT;
+    let old_supply: u64 = witness::OLD_SUPPLY;
+    let new_supply: u64 = witness::NEW_SUPPLY;
+    let old_backing: u64 = witness::OLD_BACKING;
+    let new_backing: u64 = witness::NEW_BACKING;
+    let payout: u64 = witness::PAYOUT;
+
+
+    assert!(jet::lt_64(0, amount));
+
+    assert!(jet::le_64(amount, old_supply));
+
+    let (borrow, diff): (bool, u64) = jet::subtract_64(old_supply, amount);
+    assert!(jet::eq_64(diff, new_supply));
+
+    assert!(jet::le_64(payout, old_backing));
+    let (borrow2, diff2): (bool, u64) = jet::subtract_64(old_backing, payout);
+    assert!(jet::eq_64(diff2, new_backing));
+}

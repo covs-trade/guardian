@@ -1,0 +1,58 @@
+{
+  "name": "@crclaunch/cove-indexer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./v3": "./src/v3/index.ts",
+    "./legacy": "./src/index.ts",
+    "./testing": "./src/v3/testing/regtest-fixture.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "index": "tsx src/cli.ts index",
+    "verify": "tsx src/cli.ts verify",
+    "status": "tsx src/cli.ts status",
+    "v3:reindex": "tsx src/v3/cli-run.ts reindex",
+    "v3:verify": "tsx src/v3/cli-run.ts verify",
+    "v3:status": "tsx src/v3/cli-run.ts status",
+    "v3:lifecycle-index": "tsx src/v3/lifecycle-index.ts",
+    "test:integration": "tsx src/store.integration.ts",
+    "worker": "tsx src/cli.ts worker",
+    "signet-proof": "tsx src/signet-proof.ts",
+    "mutinynet-proof": "tsx src/mutinynet-proof.ts",
+    "mainnet-config": "tsx src/mainnet-config.ts",
+    "mainnet-canary": "tsx src/mainnet-canary.ts",
+    "regtest-reorg": "tsx src/regtest-reorg.ts",
+    "v3:persistent-lifecycle": "tsx src/v3/persistent-lifecycle.ts",
+    "v3:persistent-reorg-matrix": "tsx src/v3/persistent-reorg-matrix.ts"
+  },
+  "dependencies": {
+    "@crclaunch/bitcoin": "workspace:*",
+    "@crclaunch/config": "workspace:*",
+    "@crclaunch/cove-covenant": "workspace:*",
+    "@crclaunch/cove-economics": "workspace:*",
+    "@crclaunch/cove-vault": "workspace:*",
+    "@crclaunch/cove-wire": "workspace:*",
+    "@crclaunch/curve": "workspace:*",
+    "@crclaunch/protocol": "workspace:*",
+    "@crclaunch/db": "workspace:*",
+    "bitcoinjs-lib": "^6.1.7",
+    "tiny-secp256k1": "^2.2.3",
+    "drizzle-orm": "^0.36.4",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@crclaunch/cove-guardian": "workspace:*",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "ecpair": "^2.1.0"
+  }
+}

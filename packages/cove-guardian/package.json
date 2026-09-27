@@ -1,0 +1,41 @@
+{
+  "name": "@crclaunch/cove-guardian",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./v3": "./src/v3/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "regtest-proof": "tsx src/regtest-proof.ts",
+    "v3-regtest-lifecycle": "tsx src/v3-lifecycle.ts",
+    "v3-mainnet-profile-lifecycle": "tsx src/v3-mainnet-profile-lifecycle.ts",
+    "v3-production-profile-lifecycle": "tsx src/v3-production-profile-lifecycle.ts",
+    "v3-mutinynet-proof": "tsx src/v3-mutinynet-proof.ts"
+  },
+  "dependencies": {
+    "@crclaunch/bitcoin": "workspace:*",
+    "@crclaunch/cove-covenant": "workspace:*",
+    "@crclaunch/cove-economics": "workspace:*",
+    "@crclaunch/cove-mainnet": "workspace:*",
+    "@crclaunch/cove-simplicity": "workspace:*",
+    "@crclaunch/cove-vault": "workspace:*",
+    "@crclaunch/cove-wire": "workspace:*",
+    "@crclaunch/curve": "workspace:*",
+    "bitcoinjs-lib": "^6.1.7",
+    "ecpair": "^2.1.0",
+    "tiny-secp256k1": "^2.2.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,2129 @@
+import * as bitcoin from "bitcoinjs-lib";
+import * as ecc from "tiny-secp256k1";
+import { randomBytes } from "node:crypto";
+import { eq, and, isNull } from "drizzle-orm";
+import { schema, type Database } from "@crclaunch/db";
+import type { CoreRpcProvider } from "@crclaunch/bitcoin";
+import {
+  TOKEN_CARRIER_SATS,
+  applyMintV2,
+  applyRedeemV2,
+  stateHashV2,
+  type CoveStateV2,
+  type CoveCanonicalView,
+} from "@crclaunch/cove-covenant";
+import {
+  buildDeployPsbtV3,
+  buildMintPsbtV3,
+  buildRedeemPsbtV3,
+  buildTransferPsbtV2,
+  validateFinalizedDeployTransaction,
+  validateFinalizedMintTransaction,
+  validateFinalizedRedeemTransaction,
+  validateFinalizedTransferTransaction,
+  RESERVE_ANCHOR_SATS,
+  decodeCoveOpReturnTx,
+  type ValidatedCoveTransaction,
+  type ResolvedInput,
+  type GuardianTransitionSigner,
+  type TransitionSignRequest,
+  validateMintTransitionV3,
+  validateRedeemTransitionV3,
+  chainFundingChecker,
+  ordAssetLookup,
+  type AssetLookup,
+  type FundingInputChecker,
+} from "@crclaunch/cove-guardian/v3";
+import {
+  loadCanonicalViewSnapshotFromDb,
+  computeHealth,
+  getTokenUtxosByScriptDb,
+  getLiveTokenUtxosAtDb,
+} from "@crclaunch/cove-indexer/v3";
+import {
+  grossBuy,
+  grossRedeem,
+  mintFeeSats,
+  redeemFeeSats,
+  creatorFeeSats,
+  CREATOR_RECORD_SATS,
+  LAUNCH_FEE_SATS,
+  checkRedeemPayout,
+} from "@crclaunch/cove-economics";
+import {
+  ATOMS_PER_TOKEN,
+  LOT_TOKENS,
+  PUBLIC_SUPPLY_ATOMS,
+} from "@crclaunch/curve";
+import {
+  canonicalTicker,
+  computeTokenId,
+  OP_MINT,
+  OP_REDEEM,
+  type ParsedEnvelopeV2,
+} from "@crclaunch/cove-wire";
+import {
+  MarketService,
+  publicListing,
+  defaultMarketConfig,
+  mainnetMarketConfig,
+  listingIdOf,
+  cancellationHashOf,
+  cancellationMessageToSign,
+  getBuyRoutes,
+  getSellOptions,
+  type ListingV1,
+} from "@crclaunch/cove-market";
+import { AppError } from "./errors.js";
+import { DEV_RISK_POLICY } from "./transition-signer.js";
+import type { V3AppConfig, V3Network } from "./config.js";
+import { checkCoreAgreement, verifyMainnetGenesis } from "./readiness.js";
+import {
+  unsignedTxDigest,
+  parsePsbt,
+  btcNetwork,
+  validateInputSignature,
+  walletDeltaSats,
+} from "./psbt.js";
+import {
+  resolveFundingUtxos,
+  type FundingCandidate,
+  type ResolvedFunding,
+} from "./funding.js";
+import {
+  resolveWalletIdentity,
+  walletIdentityFrom,
+  type ResolvedWalletIdentity,
+} from "./wallet-identity.js";
+import {
+  estimateOperationVsize,
+  loadFeeRates,
+  resolveMinerFee,
+  FeeError,
+  type CoveOperation,
+  type FeeRates,
+} from "./fees.js";
+import {
+  createTxSession,
+  requireTxSession,
+  updateTxSession,
+  findBroadcastSpendOfBacking,
+} from "./tx-session.js";
+import {
+  upsertTokenMetadata,
+  validateMetadata,
+  type TokenMetadataInput,
+} from "./metadata.js";
+import {
+  listV3Tokens,
+  getV3TokenDetail,
+  getTokenHolders,
+  getTokenActivity,
+} from "./token-read.js";
+import { getWalletPortfolio } from "./wallet-read.js";
+import { getV3Status } from "./health.js";
+bitcoin.initEccLib(ecc as unknown as Parameters<typeof bitcoin.initEccLib>[0]);
+export interface LaunchPrepareInput {
+  ticker: string;
+  displayName: string;
+  description: string;
+  websiteUrl?: string | null;
+  xUrl?: string | null;
+  imageUrl?: string | null;
+  nonceHex?: string;
+  creatorScript?: string;
+}
+export interface LaunchPrepareResult {
+  tokenId: string | null;
+  ticker: string;
+  nonceHex: string;
+  policyVersion: number;
+  chainIdentity: string;
+  publicCapAtoms: bigint;
+  publicSupplyAtoms: bigint;
+  curve: string;
+  vaultAnchorSats: bigint;
+  launchFeeSats: bigint;
+}
+export interface BackingQuote {
+  tokenId: string;
+  amountAtoms: bigint;
+  stateHash: string;
+  backingOutpoint: {
+    txid: string;
+    vout: number;
+  };
+  supplyBeforeAtoms: bigint;
+  supplyAfterAtoms: bigint;
+  backingBeforeSats: bigint;
+  backingAfterSats: bigint;
+  grossSats: bigint;
+  feeSats: bigint;
+  creatorFeeSats: bigint;
+  feeBps: bigint;
+  indexedHeight: bigint;
+  indexedBlockHash: string;
+  expiresAtHeight: bigint;
+}
+export interface RedeemQuote {
+  tokenId: string;
+  amountAtoms: bigint;
+  stateHash: string;
+  backingOutpoint: {
+    txid: string;
+    vout: number;
+  };
+  supplyBeforeAtoms: bigint;
+  supplyAfterAtoms: bigint;
+  backingBeforeSats: bigint;
+  backingAfterSats: bigint;
+  grossSats: bigint;
+  feeSats: bigint;
+  netSats: bigint;
+}
+export interface IntentV3 {
+  operation: "DEPLOY" | "BACKING_BUY" | "REDEEM" | "TRANSFER";
+  tokenId: string | null;
+  tokenAmountAtoms: bigint | null;
+  grossSats: bigint | null;
+  protocolFeeSats: bigint | null;
+  creatorFeeSats?: bigint;
+  creatorScript?: string;
+  minerFeeSats: bigint;
+  netSats: bigint | null;
+  walletScript: string;
+  ordinalsScript: string;
+  stateHash: string | null;
+  unsignedTxDigest: string;
+  walletDeltaSats: bigint;
+}
+interface BackingRow {
+  state: CoveStateV2;
+  stateHash: string;
+  input: ResolvedInput;
+}
+const MAX_REDEEM_TOKEN_INPUTS = 4;
+const MAX_TRANSFER_TOKEN_INPUTS = 4;
+const DEFAULT_LISTING_BLOCKS = 1008n;
+const MAX_PENDING_BACKING_CHAIN = 24;
+const BACKING_SUCCESSOR_VOUT = 1;
+const FEE_RATE_CACHE_MS = 15000;
+function assertRedeemPayoutIsPayable(params: {
+  grossSats: bigint;
+  feeSats: bigint;
+  payoutScript: Buffer;
+}): void {
+  const check = checkRedeemPayout(
+    params.grossSats,
+    params.feeSats,
+    params.payoutScript,
+  );
+  if (check.isPayable) return;
+  throw new AppError(
+    "ECONOMIC_DUST",
+    `this sale is worth ${check.grossSats} sats and the exit fee is ${check.feeSats} sats, ` +
+      `so it would pay out ${check.netSats} sats. A sale has to be worth at least ` +
+      `${check.minimumGrossSats} sats to be worth making. Sell a larger amount.`,
+  );
+}
+export class V3AppService {
+  readonly market: MarketService;
+  readonly fundingChecker: FundingInputChecker;
+  private readonly assets: AssetLookup | null;
+  private feeRatesCache: {
+    at: number;
+    rates: FeeRates;
+  } | null = null;
+  constructor(
+    readonly db: Database,
+    readonly provider: CoreRpcProvider,
+    readonly config: V3AppConfig,
+    readonly transitionSigner: GuardianTransitionSigner,
+    readonly secondaryProvider: CoreRpcProvider | null = null,
+  ) {
+    this.assets = config.ordUrl ? ordAssetLookup(config.ordUrl) : null;
+    this.fundingChecker = chainFundingChecker({
+      chain: provider,
+      isCoveCarrier: async (o) =>
+        (await getLiveTokenUtxosAtDb(db, config.network, [o])).length > 0,
+      assets: this.assets ?? undefined,
+    });
+    this.market = new MarketService(
+      db,
+      provider,
+      config.network === "mainnet"
+        ? mainnetMarketConfig({
+            p2pFeeBps: config.p2pFeeBps ?? 50,
+            feeScript: config.feeScript,
+            maxP2pSettlementSats: config.maxP2pSettlementSats ?? 0n,
+            chainIdentity: config.chainIdentity,
+          })
+        : defaultMarketConfig(
+            config.network,
+            config.feeScript,
+            config.chainIdentity,
+          ),
+    );
+  }
+  private assertEnabled(): void {
+    if (!this.config.enabled)
+      throw new AppError("APP_DISABLED", "covs is disabled on this server");
+    if (
+      this.config.network === "mainnet" &&
+      this.config.mainnetMutationsArmed !== true
+    ) {
+      throw new AppError("MAINNET_DISABLED", "mainnet mutations are not armed");
+    }
+  }
+  private assertNetwork(): V3Network {
+    if (
+      this.config.network === "mainnet" &&
+      this.config.mainnetProfileValid !== true
+    ) {
+      throw new AppError(
+        "MAINNET_DISABLED",
+        "mainnet mutations need the committed profile to validate",
+      );
+    }
+    return this.config.network;
+  }
+  private assertMutating(): V3Network {
+    this.assertEnabled();
+    return this.assertNetwork();
+  }
+  private assertCanaryAllowed(params: {
+    tokenId?: string;
+    walletScript?: string;
+  }): void {
+    if (
+      this.config.canaryAllowedTokenIds &&
+      params.tokenId &&
+      !this.config.canaryAllowedTokenIds.includes(params.tokenId)
+    ) {
+      throw new AppError(
+        "CANARY_TOKEN_NOT_ALLOWED",
+        `token ${params.tokenId} is not in the canary allowlist`,
+      );
+    }
+    if (
+      this.config.canaryAllowedWalletScripts &&
+      params.walletScript &&
+      !this.config.canaryAllowedWalletScripts.includes(
+        params.walletScript.toLowerCase(),
+      )
+    ) {
+      throw new AppError(
+        "CANARY_WALLET_NOT_ALLOWED",
+        "wallet script is not in the canary allowlist",
+      );
+    }
+  }
+  private async requireHealthy(): Promise<void> {
+    const health = await computeHealth({
+      db: this.db,
+      network: this.config.network,
+      provider: this.provider,
+    });
+    if (health.health === "REBUILDING")
+      throw new AppError("INDEXER_REBUILDING", "indexer is rebuilding");
+    if (health.health === "DIVERGED")
+      throw new AppError("INDEXER_DIVERGED", "indexer diverged from Core tip");
+    if (health.health === "CORE_UNREACHABLE")
+      throw new AppError("CORE_UNAVAILABLE", "Bitcoin Core unreachable");
+    if (health.health === "BEHIND")
+      throw new AppError(
+        "INDEXER_UNHEALTHY",
+        "indexer behind by " + health.lag,
+      );
+    if (this.secondaryProvider) {
+      const agreement = await checkCoreAgreement(
+        this.provider,
+        this.secondaryProvider,
+      );
+      if (!agreement.agreed)
+        throw new AppError(
+          "CORE_UNAVAILABLE",
+          `Core disagreement: ${agreement.detail ?? "unknown"}`,
+        );
+    }
+    if (this.config.network === "mainnet") {
+      if (!(await verifyMainnetGenesis(this.provider))) {
+        throw new AppError(
+          "CORE_UNAVAILABLE",
+          "primary Core is not on Bitcoin mainnet (genesis hash mismatch)",
+        );
+      }
+      if (
+        this.secondaryProvider &&
+        !(await verifyMainnetGenesis(this.secondaryProvider))
+      ) {
+        throw new AppError(
+          "CORE_UNAVAILABLE",
+          "secondary Core is not on Bitcoin mainnet (genesis hash mismatch)",
+        );
+      }
+    }
+  }
+  status() {
+    return getV3Status({
+      db: this.db,
+      provider: this.provider,
+      config: this.config,
+    });
+  }
+  listTokens(opts?: { ticker?: string; search?: string; limit?: number }) {
+    return listV3Tokens(this.db, this.config.network, opts);
+  }
+  tokenDetail(tokenId: string) {
+    return getV3TokenDetail(this.db, this.config.network, tokenId);
+  }
+  tokenHolders(tokenId: string, limit?: number) {
+    return getTokenHolders(this.db, this.config.network, tokenId, limit);
+  }
+  tokenActivity(tokenId: string, limit?: number) {
+    return getTokenActivity(this.db, this.config.network, tokenId, limit);
+  }
+  walletPortfolio(walletScript: string) {
+    return getWalletPortfolio(this.db, this.config.network, walletScript);
+  }
+  private async loadBacking(tokenId: string): Promise<BackingRow> {
+    return this.followPendingBacking(
+      tokenId,
+      await this.loadConfirmedBacking(tokenId),
+    );
+  }
+  private async loadConfirmedBacking(tokenId: string): Promise<BackingRow> {
+    const rows = await this.db
+      .select()
+      .from(schema.coveV3BackingStates)
+      .where(
+        and(
+          eq(schema.coveV3BackingStates.network, this.config.network),
+          eq(schema.coveV3BackingStates.tokenId, tokenId),
+          eq(schema.coveV3BackingStates.canonical, true),
+        ),
+      );
+    const b = rows[0];
+    if (!b) throw new AppError("TOKEN_NOT_FOUND", "token not found");
+    const state: CoveStateV2 = {
+      stateVersion: b.stateVersion as 2,
+      policyVersion: b.policyVersion,
+      tokenId: b.tokenId,
+      issuedPublicSupplyAtoms: b.issuedSupplyAtoms,
+      backingSats: b.backingSats,
+      curveStage: b.curveStage,
+    };
+    const confirmed: BackingRow = {
+      state,
+      stateHash: b.stateHash,
+      input: {
+        txid: b.txid,
+        vout: b.vout,
+        script: Buffer.from(b.scriptPubKey, "hex"),
+        valueSats: b.btcValue,
+      },
+    };
+    return confirmed;
+  }
+  private async loadBackingAt(
+    tokenId: string,
+    txid: string | null,
+    vout: number | null,
+  ): Promise<BackingRow> {
+    const confirmed = await this.loadConfirmedBacking(tokenId);
+    if (!txid || vout === null)
+      return this.followPendingBacking(tokenId, confirmed);
+    return this.followPendingBacking(tokenId, confirmed, { txid, vout });
+  }
+  private async followPendingBacking(
+    tokenId: string,
+    confirmed: BackingRow,
+    stopAt?: {
+      txid: string;
+      vout: number;
+    },
+  ): Promise<BackingRow> {
+    let tip = confirmed;
+    for (let depth = 0; depth < MAX_PENDING_BACKING_CHAIN; depth++) {
+      if (
+        stopAt &&
+        tip.input.txid === stopAt.txid &&
+        tip.input.vout === stopAt.vout
+      )
+        return tip;
+      const next = await findBroadcastSpendOfBacking(
+        this.db,
+        this.config.network,
+        tokenId,
+        tip.input.txid,
+        tip.input.vout,
+      );
+      if (!next?.txid) return tip;
+      let raw: string;
+      try {
+        raw = await this.provider.getRawTransaction(next.txid);
+      } catch {
+        return tip;
+      }
+      const tx = bitcoin.Transaction.fromHex(raw);
+      let envelope: ParsedEnvelopeV2;
+      try {
+        envelope = decodeCoveOpReturnTx(tx);
+      } catch {
+        return tip;
+      }
+      let nextState: CoveStateV2;
+      if (envelope.op === OP_MINT) {
+        nextState = applyMintV2(tip.state, envelope.amount).nextState;
+      } else if (envelope.op === OP_REDEEM) {
+        nextState = applyRedeemV2(tip.state, envelope.redeemAmount).nextState;
+      } else {
+        return tip;
+      }
+      const vaultOut = tx.outs[BACKING_SUCCESSOR_VOUT];
+      const expectedValue = RESERVE_ANCHOR_SATS + nextState.backingSats;
+      if (!vaultOut || BigInt(vaultOut.value) !== expectedValue) return tip;
+      tip = {
+        state: nextState,
+        stateHash: stateHashV2(nextState),
+        input: {
+          txid: tx.getId(),
+          vout: BACKING_SUCCESSOR_VOUT,
+          script: Buffer.from(vaultOut.script),
+          valueSats: expectedValue,
+        },
+      };
+    }
+    return tip;
+  }
+  private overlayPendingBacking(
+    view: CoveCanonicalView,
+    tokenIdHex: string,
+    tip: BackingRow,
+  ): CoveCanonicalView {
+    const tipOutpoint = { txid: tip.input.txid, vout: tip.input.vout };
+    const matches = (tokenId: Buffer) => tokenId.toString("hex") === tokenIdHex;
+    return {
+      cursorHeight: view.cursorHeight,
+      getBackingOutpoint: (tokenId) =>
+        matches(tokenId) ? tipOutpoint : view.getBackingOutpoint(tokenId),
+      getCurrentBackingState: (tokenId) =>
+        matches(tokenId) ? tip.state : view.getCurrentBackingState(tokenId),
+      getBackingStateByOutpoint: (outpoint) =>
+        outpoint.txid === tipOutpoint.txid && outpoint.vout === tipOutpoint.vout
+          ? tip.state
+          : view.getBackingStateByOutpoint(outpoint),
+      getTokenUtxo: (outpoint) => view.getTokenUtxo(outpoint),
+      getTokenCreatorScript: (tokenId) =>
+        view.getTokenCreatorScript?.(tokenId) ?? null,
+    };
+  }
+  private async creatorScriptOf(tokenId: string): Promise<Buffer> {
+    const rows = await this.db
+      .select({ creatorScript: schema.coveV3Tokens.creatorScript })
+      .from(schema.coveV3Tokens)
+      .where(
+        and(
+          eq(schema.coveV3Tokens.network, this.config.network),
+          eq(schema.coveV3Tokens.tokenId, tokenId),
+          eq(schema.coveV3Tokens.canonical, true),
+        ),
+      );
+    const c = rows[0]?.creatorScript;
+    if (!c)
+      throw new AppError("TOKEN_NOT_FOUND", "token has no recorded creator");
+    return Buffer.from(c, "hex");
+  }
+  private async loadView(
+    tokenId: string,
+    relevantOutpoints: {
+      txid: string;
+      vout: number;
+    }[] = [],
+  ): Promise<CoveCanonicalView> {
+    return loadCanonicalViewSnapshotFromDb({
+      db: this.db,
+      network: this.config.network,
+      tokenId,
+      relevantOutpoints,
+    });
+  }
+  async feeRates(): Promise<FeeRates> {
+    const now = Date.now();
+    if (this.feeRatesCache && now - this.feeRatesCache.at < FEE_RATE_CACHE_MS) {
+      return this.feeRatesCache.rates;
+    }
+    const rates = await loadFeeRates(this.provider);
+    this.feeRatesCache = { at: now, rates };
+    return rates;
+  }
+  private async assetsAt(o: {
+    txid: string;
+    vout: number;
+  }): Promise<string | null> {
+    if (!this.assets) return null;
+    try {
+      return await this.assets.describeAssets(o);
+    } catch (e) {
+      throw new AppError(
+        "FUNDING_CHECK_UNAVAILABLE",
+        `could not check ${o.txid}:${o.vout} for inscriptions and runes: ${(e as Error).message}`,
+      );
+    }
+  }
+  private async resolveFundingAndFee(params: {
+    op: CoveOperation;
+    wallet: ResolvedWalletIdentity;
+    candidates: FundingCandidate[];
+    targetSats: bigint;
+    tokenInputs?: number;
+    recipientCarriers?: number;
+    discovery?: boolean;
+    feeRateSatPerVb?: bigint;
+    explicitMinerFeeSats?: bigint;
+  }): Promise<{
+    inputs: ResolvedInput[];
+    minerFeeSats: bigint;
+    vsize: number;
+    satPerVb: bigint;
+  }> {
+    const resolved = await resolveFundingUtxos(
+      this.provider,
+      params.candidates,
+    );
+    for (const f of resolved) {
+      if (f.script.toString("hex") !== params.wallet.payments.script) {
+        throw new AppError(
+          "FUNDING_INPUT_INVALID",
+          "funding input script does not match wallet",
+        );
+      }
+    }
+    const carriers = await getLiveTokenUtxosAtDb(
+      this.db,
+      this.config.network,
+      params.candidates,
+    );
+    if (carriers.length > 0) {
+      throw new AppError(
+        "FUNDING_INPUT_IS_TOKEN",
+        `funding input ${carriers[0]!.txid}:${carriers[0]!.vout} holds tokens and cannot pay for a trade`,
+      );
+    }
+    const rates = await this.feeRates();
+    const standard =
+      rates.tiers.find((t) => t.key === "standard") ?? rates.tiers[0]!;
+    const feeRateSatPerVb =
+      params.feeRateSatPerVb ??
+      (params.explicitMinerFeeSats === undefined
+        ? standard.satPerVb
+        : undefined);
+    const shape = {
+      tokenInputs: params.tokenInputs,
+      fundingKind: params.wallet.payments.kind,
+      tokenKind: params.wallet.ordinals.kind,
+      walletScriptBytes: params.wallet.payments.script.length / 2,
+      ordinalsScriptBytes: params.wallet.ordinals.script.length / 2,
+      feeScriptBytes: this.config.feeScript.length,
+      recipientCarriers: params.recipientCarriers,
+      discovery: params.discovery,
+    };
+    const priceAt = (fundingInputs: number) => {
+      const vsize = estimateOperationVsize(params.op, {
+        ...shape,
+        fundingInputs,
+      });
+      let fee;
+      try {
+        fee = resolveMinerFee({
+          rateSatPerVb: feeRateSatPerVb,
+          explicitSats: params.explicitMinerFeeSats,
+          vsize,
+          floorSatPerVb: rates.floorSatPerVb,
+          ceilingSatPerVb: rates.ceilingSatPerVb,
+          maxMinerFeeSats: this.config.maxMinerFeeSats,
+        });
+      } catch (e) {
+        if (e instanceof FeeError)
+          throw new AppError(e.code, e.message.replace(/^\[[A-Z_]+\]\s*/, ""));
+        throw e;
+      }
+      return {
+        vsize: fee.vsize,
+        minerFeeSats: fee.minerFeeSats,
+        satPerVb: fee.effectiveSatPerVb,
+      };
+    };
+    const vaultOp = params.op === "BACKING_BUY" || params.op === "REDEEM";
+    const pending = vaultOp ? resolved.filter((f) => f.confirmations < 1) : [];
+    const usable = vaultOp
+      ? resolved.filter((f) => f.confirmations >= 1)
+      : resolved;
+    let sorted = [...usable].sort((a, b) => {
+      if (a.valueSats !== b.valueSats)
+        return a.valueSats > b.valueSats ? -1 : 1;
+      if (a.txid !== b.txid) return a.txid < b.txid ? -1 : 1;
+      return a.vout - b.vout;
+    });
+    const toInput = (f: ResolvedFunding): ResolvedInput => ({
+      txid: f.txid,
+      vout: f.vout,
+      script: f.script,
+      valueSats: f.valueSats,
+      publicKey: params.wallet.payments.publicKeyBuffer,
+    });
+    const noFunding = priceAt(0);
+    if (params.targetSats + noFunding.minerFeeSats <= 0n) {
+      return { inputs: [], ...noFunding };
+    }
+    const skippedAssets: string[] = [];
+    let chosen: ResolvedFunding[] = [];
+    let sum = 0n;
+    pick: for (;;) {
+      chosen = [];
+      sum = 0n;
+      for (const utxo of sorted) {
+        chosen.push(utxo);
+        sum += utxo.valueSats;
+        const priced = priceAt(chosen.length);
+        if (sum >= params.targetSats + priced.minerFeeSats) {
+          for (const f of chosen) {
+            const held = await this.assetsAt(f);
+            if (held) {
+              skippedAssets.push(`${f.txid}:${f.vout} (${held})`);
+              sorted = sorted.filter((u) => u !== f);
+              continue pick;
+            }
+          }
+          return { inputs: chosen.map(toInput), ...priced };
+        }
+      }
+      break;
+    }
+    const shortfall = priceAt(Math.max(1, chosen.length));
+    const need = params.targetSats + shortfall.minerFeeSats;
+    const twoAddress =
+      params.wallet.payments.script !== params.wallet.ordinals.script;
+    const pendingSats = pending.reduce((a, f) => a + f.valueSats, 0n);
+    throw new AppError(
+      "INSUFFICIENT_BTC",
+      `Your payment address has ${sum} usable sats; this needs ${need} ` +
+        `(${params.targetSats} for the trade, ${shortfall.minerFeeSats} network fee at ` +
+        `${shortfall.satPerVb} sat/vB).` +
+        (pending.length > 0
+          ? ` Another ${pendingSats} sats are still unconfirmed; mints and sales use only confirmed BTC, so wait for your last transaction to confirm.`
+          : "") +
+        (skippedAssets.length > 0
+          ? ` Skipped coins holding inscriptions or runes: ${skippedAssets.join(", ")}.`
+          : "") +
+        (twoAddress
+          ? " covs pays only from your wallet's payment (BTC) address, not its token (taproot) address — send BTC there first."
+          : ""),
+    );
+  }
+  prepareLaunch(input: LaunchPrepareInput): LaunchPrepareResult {
+    this.assertEnabled();
+    const ticker = canonicalTicker(input.ticker);
+    const nonce = input.nonceHex
+      ? Buffer.from(input.nonceHex, "hex")
+      : randomBytes(32);
+    if (nonce.length !== 32)
+      throw new AppError("TOKEN_AMOUNT_INVALID", "nonce must be 32 bytes");
+    const creatorScript = input.creatorScript
+      ? Buffer.from(input.creatorScript, "hex")
+      : null;
+    const tokenId = creatorScript
+      ? computeTokenId({
+          chainIdentity: this.config.chainIdentity,
+          policyVersion: 3,
+          ticker,
+          tokenNonce: nonce,
+          creatorScript,
+        }).toString("hex")
+      : null;
+    validateMetadata({
+      displayName: input.displayName,
+      description: input.description,
+      websiteUrl: input.websiteUrl,
+      xUrl: input.xUrl,
+      imageUrl: input.imageUrl,
+    });
+    return {
+      tokenId,
+      ticker,
+      nonceHex: nonce.toString("hex"),
+      policyVersion: 3,
+      chainIdentity: this.config.chainIdentity,
+      publicCapAtoms: PUBLIC_SUPPLY_ATOMS,
+      publicSupplyAtoms: PUBLIC_SUPPLY_ATOMS,
+      curve: "stairs210",
+      vaultAnchorSats: RESERVE_ANCHOR_SATS,
+      launchFeeSats: LAUNCH_FEE_SATS,
+    };
+  }
+  async buildLaunch(params: {
+    ticker: string;
+    nonceHex: string;
+    walletScript: string;
+    ordinalsScript?: string;
+    walletPublicKey?: string;
+    ordinalsPublicKey?: string;
+    walletAddress: string | null;
+    funding: FundingCandidate[];
+    feeRateSatPerVb?: bigint;
+    minerFeeSats?: bigint;
+    metadata: TokenMetadataInput;
+    idempotencyKey: string;
+  }): Promise<{
+    sessionId: string;
+    psbtBase64: string;
+    intent: IntentV3;
+    tokenId: string;
+  }> {
+    this.assertMutating();
+    await this.requireHealthy();
+    const wallet = resolveWalletIdentity(walletIdentityFrom(params));
+    const creatorScript = wallet.payments.scriptBuffer;
+    const tokenId = computeTokenId({
+      chainIdentity: this.config.chainIdentity,
+      policyVersion: 3,
+      ticker: canonicalTicker(params.ticker),
+      tokenNonce: Buffer.from(params.nonceHex, "hex"),
+      creatorScript,
+    }).toString("hex");
+    this.assertCanaryAllowed({ tokenId, walletScript: params.walletScript });
+    const { inputs: deployerInputs, minerFeeSats } =
+      await this.resolveFundingAndFee({
+        op: "DEPLOY",
+        wallet,
+        candidates: params.funding,
+        targetSats: RESERVE_ANCHOR_SATS + CREATOR_RECORD_SATS + LAUNCH_FEE_SATS,
+        feeRateSatPerVb: params.feeRateSatPerVb,
+        explicitMinerFeeSats: params.minerFeeSats,
+      });
+    const result = buildDeployPsbtV3({
+      network: btcNetwork(this.config.network),
+      identity: {
+        chainIdentity: this.config.chainIdentity,
+        policyVersion: 3,
+        ticker: canonicalTicker(params.ticker),
+        tokenNonce: Buffer.from(params.nonceHex, "hex"),
+      },
+      guardianXOnly: this.config.guardianXOnly,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      deployerInputs,
+      deployerChangeScript: wallet.payments.scriptBuffer,
+      creatorScript,
+      feeScript: this.config.feeScript,
+      minerFeeSats,
+    });
+    const psbtBase64 = result.psbt.toBase64();
+    const digest = unsignedTxDigest(result.psbt);
+    const metadataJson = validateMetadata(params.metadata);
+    const session = await createTxSession(this.db, {
+      network: this.config.network,
+      operation: "DEPLOY",
+      tokenId,
+      walletScript: params.walletScript,
+      walletAddress: params.walletAddress,
+      stateHash: null,
+      backingTxid: null,
+      backingVout: null,
+      unsignedTxDigest: digest,
+      psbtBase64,
+      metadataJson,
+      status: "BUILT",
+      expiresAtHeight: null,
+      idempotencyKey: params.idempotencyKey,
+    });
+    return {
+      sessionId: session.id,
+      psbtBase64,
+      tokenId,
+      intent: {
+        operation: "DEPLOY",
+        tokenId,
+        tokenAmountAtoms: 0n,
+        grossSats: null,
+        protocolFeeSats: LAUNCH_FEE_SATS,
+        minerFeeSats: result.minerFeeSats,
+        netSats: null,
+        walletScript: wallet.payments.script,
+        ordinalsScript: wallet.ordinals.script,
+        stateHash: null,
+        unsignedTxDigest: digest,
+        walletDeltaSats: walletDeltaSats(result.psbt, wallet.scripts),
+      },
+    };
+  }
+  async submitLaunch(params: {
+    sessionId: string;
+    signedPsbtBase64: string;
+  }): Promise<{
+    txid: string;
+  }> {
+    this.assertEnabled();
+    const session = await requireTxSession(this.db, params.sessionId);
+    if (session.operation !== "DEPLOY")
+      throw new AppError("SESSION_STATE_INVALID", "session is not DEPLOY");
+    if (session.status === "BROADCAST" || session.status === "CONFIRMED") {
+      if (session.metadataJson && session.tokenId && session.txid) {
+        await upsertTokenMetadata({
+          db: this.db,
+          network: this.config.network,
+          tokenId: session.tokenId,
+          submittedByScript: session.walletScript,
+          deployTxid: session.txid,
+          metadata: session.metadataJson,
+        });
+      }
+      return { txid: session.txid! };
+    }
+    const psbt = parsePsbt(
+      params.signedPsbtBase64,
+      btcNetwork(this.config.network),
+    );
+    if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
+      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+    for (let i = 0; i < psbt.data.inputs.length; i++)
+      validateInputSignature(psbt, i);
+    psbt.finalizeAllInputs();
+    const rawTxHex = psbt.extractTransaction().toHex();
+    const validated = validateFinalizedDeployTransaction({
+      rawTxHex,
+      network: this.config.network,
+      chainIdentity: this.config.chainIdentity,
+      guardianXOnly: this.config.guardianXOnly,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      feeScript: this.config.feeScript,
+    });
+    if (!("rawTxHex" in validated))
+      throw new AppError("GUARDIAN_REJECTED", validated.reason);
+    const txid = await this.broadcast(validated);
+    await updateTxSession(this.db, session.id, { txid, status: "BROADCAST" });
+    if (session.metadataJson && session.tokenId) {
+      await upsertTokenMetadata({
+        db: this.db,
+        network: this.config.network,
+        tokenId: session.tokenId,
+        submittedByScript: session.walletScript,
+        deployTxid: txid,
+        metadata: session.metadataJson,
+      });
+    }
+    return { txid };
+  }
+  mintLimits(): {
+    maxMintAtoms: bigint;
+    maxGrossSats: bigint | null;
+    minGrossSats: bigint;
+  } {
+    return (
+      this.config.mintLimits ?? {
+        maxMintAtoms: DEV_RISK_POLICY.maxMintAtoms,
+        maxGrossSats: DEV_RISK_POLICY.maxGrossSats,
+        minGrossSats: DEV_RISK_POLICY.minMintGrossSats,
+      }
+    );
+  }
+  async quoteBuyForSats(
+    tokenId: string,
+    budgetSats: bigint,
+  ): Promise<{
+    amountAtoms: bigint;
+    grossSats: bigint;
+    feeSats: bigint;
+    creatorFeeSats: bigint;
+    carrierSats: bigint;
+    totalSats: bigint;
+    limitedBy: "budget" | "per-mint limit" | "supply";
+    minGrossSats: bigint;
+    maxGrossSats: bigint | null;
+    minSpendSats: bigint | null;
+  }> {
+    const backing = await this.loadBacking(tokenId);
+    const supplyTokens =
+      backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN;
+    const remaining =
+      (PUBLIC_SUPPLY_ATOMS - backing.state.issuedPublicSupplyAtoms) /
+      ATOMS_PER_TOKEN;
+    const costOf = (n: bigint) => {
+      const gross = grossBuy(supplyTokens, n);
+      const fee = mintFeeSats(
+        gross,
+        n * ATOMS_PER_TOKEN,
+        this.config.buyFeeBps,
+        this.config.buyFeeFlatSats,
+      );
+      const creator = creatorFeeSats(gross);
+      return {
+        gross,
+        fee,
+        creator,
+        total: gross + fee + creator + TOKEN_CARRIER_SATS,
+      };
+    };
+    const limits = this.mintLimits();
+    const perMintLots = limits.maxMintAtoms / ATOMS_PER_TOKEN / LOT_TOKENS;
+    const remainingLots = remaining / LOT_TOKENS;
+    const fits = (lots: bigint) => {
+      const c = costOf(lots * LOT_TOKENS);
+      return (
+        c.total <= budgetSats &&
+        (limits.maxGrossSats === null || c.gross <= limits.maxGrossSats)
+      );
+    };
+    let loLots = 0n;
+    let hiLots = remainingLots < perMintLots ? remainingLots : perMintLots;
+    while (loLots < hiLots) {
+      const mid = (loLots + hiLots + 1n) / 2n;
+      if (fits(mid)) loLots = mid;
+      else hiLots = mid - 1n;
+    }
+    const lo = loLots * LOT_TOKENS;
+    const perMintTokens = perMintLots * LOT_TOKENS;
+    let minSpendSats: bigint | null = null;
+    if (remainingLots > 0n) {
+      let a = 1n;
+      let b = remainingLots;
+      while (a < b) {
+        const m = (a + b) / 2n;
+        if (costOf(m * LOT_TOKENS).gross >= limits.minGrossSats) b = m;
+        else a = m + 1n;
+      }
+      if (costOf(a * LOT_TOKENS).gross >= limits.minGrossSats)
+        minSpendSats = costOf(a * LOT_TOKENS).total;
+    }
+    const base = {
+      carrierSats: TOKEN_CARRIER_SATS,
+      minGrossSats: limits.minGrossSats,
+      maxGrossSats: limits.maxGrossSats,
+      minSpendSats,
+    } as const;
+    const nothing = {
+      ...base,
+      amountAtoms: 0n,
+      grossSats: 0n,
+      feeSats: 0n,
+      creatorFeeSats: 0n,
+      totalSats: 0n,
+      limitedBy: "budget",
+    } as const;
+    if (lo === 0n) return nothing;
+    const c = costOf(lo);
+    if (c.gross < limits.minGrossSats) return nothing;
+    const next = lo < remaining ? costOf(lo + LOT_TOKENS) : null;
+    const limitedBy =
+      lo === remaining
+        ? "supply"
+        : lo === perMintTokens || (next !== null && next.total <= budgetSats)
+          ? "per-mint limit"
+          : "budget";
+    return {
+      ...base,
+      limitedBy,
+      amountAtoms: lo * ATOMS_PER_TOKEN,
+      grossSats: c.gross,
+      feeSats: c.fee,
+      creatorFeeSats: c.creator,
+      totalSats: c.total,
+    };
+  }
+  async quoteBackingBuy(
+    tokenId: string,
+    amountAtoms: bigint,
+  ): Promise<BackingQuote> {
+    if (
+      amountAtoms <= 0n ||
+      amountAtoms % (LOT_TOKENS * ATOMS_PER_TOKEN) !== 0n
+    )
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "backing buy requires whole 1,000-token lots",
+      );
+    const backing = await this.loadBacking(tokenId);
+    const supply = backing.state.issuedPublicSupplyAtoms;
+    if (supply + amountAtoms > PUBLIC_SUPPLY_ATOMS)
+      throw new AppError("TOKEN_AMOUNT_INVALID", "exceeds public cap");
+    const gross = grossBuy(
+      supply / ATOMS_PER_TOKEN,
+      amountAtoms / ATOMS_PER_TOKEN,
+    );
+    const limits = this.mintLimits();
+    if (amountAtoms > limits.maxMintAtoms)
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "exceeds the per-mint token limit",
+      );
+    if (limits.maxGrossSats !== null && gross > limits.maxGrossSats)
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "exceeds the per-mint curve price limit",
+      );
+    if (gross < limits.minGrossSats)
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "below the minimum mint curve price",
+      );
+    const fee = mintFeeSats(
+      gross,
+      amountAtoms,
+      this.config.buyFeeBps,
+      this.config.buyFeeFlatSats,
+    );
+    const next = applyMintV2(backing.state, amountAtoms).nextState;
+    const cursor = await this.db
+      .select()
+      .from(schema.coveV3Cursor)
+      .where(eq(schema.coveV3Cursor.network, this.config.network));
+    const c = cursor[0];
+    return {
+      tokenId,
+      amountAtoms,
+      stateHash: backing.stateHash,
+      backingOutpoint: { txid: backing.input.txid, vout: backing.input.vout },
+      supplyBeforeAtoms: supply,
+      supplyAfterAtoms: next.issuedPublicSupplyAtoms,
+      backingBeforeSats: backing.state.backingSats,
+      backingAfterSats: next.backingSats,
+      grossSats: gross,
+      feeSats: fee,
+      creatorFeeSats: creatorFeeSats(gross),
+      feeBps: this.config.buyFeeBps,
+      indexedHeight: c?.height ?? 0n,
+      indexedBlockHash: c?.blockHash ?? "",
+      expiresAtHeight: (c?.height ?? 0n) + 2n,
+    };
+  }
+  async buildBackingBuy(params: {
+    tokenId: string;
+    amountAtoms: bigint;
+    quoteBinding: {
+      stateHash: string;
+      backingOutpoint: {
+        txid: string;
+        vout: number;
+      };
+      expiresAtHeight: bigint | null;
+    };
+    walletScript: string;
+    ordinalsScript?: string;
+    walletPublicKey?: string;
+    ordinalsPublicKey?: string;
+    walletAddress: string | null;
+    funding: FundingCandidate[];
+    feeRateSatPerVb?: bigint;
+    minerFeeSats?: bigint;
+    idempotencyKey: string;
+  }): Promise<{
+    sessionId: string;
+    psbtBase64: string;
+    intent: IntentV3;
+  }> {
+    this.assertMutating();
+    await this.requireHealthy();
+    this.assertCanaryAllowed({
+      tokenId: params.tokenId,
+      walletScript: params.walletScript,
+    });
+    const wallet = resolveWalletIdentity(walletIdentityFrom(params));
+    const backing = await this.loadBacking(params.tokenId);
+    if (
+      backing.stateHash !== params.quoteBinding.stateHash ||
+      backing.input.txid !== params.quoteBinding.backingOutpoint.txid ||
+      backing.input.vout !== params.quoteBinding.backingOutpoint.vout
+    ) {
+      throw new AppError("QUOTE_STALE", "backing state changed since quote");
+    }
+    const discoveryTicker = this.config.discoveryEnvelope
+      ? (await getV3TokenDetail(this.db, this.config.network, params.tokenId))
+          ?.ticker
+      : undefined;
+    const { grossSats: quotedGrossSats } = applyMintV2(
+      backing.state,
+      params.amountAtoms,
+    );
+    const quotedBuyFeeSats = mintFeeSats(
+      quotedGrossSats,
+      params.amountAtoms,
+      this.config.buyFeeBps,
+      this.config.buyFeeFlatSats,
+    );
+    const creatorScript = await this.creatorScriptOf(params.tokenId);
+    const quotedCreatorFeeSats = creatorFeeSats(quotedGrossSats);
+    const { inputs: buyerInputs, minerFeeSats } =
+      await this.resolveFundingAndFee({
+        op: "BACKING_BUY",
+        wallet,
+        candidates: params.funding,
+        targetSats:
+          quotedGrossSats +
+          quotedBuyFeeSats +
+          quotedCreatorFeeSats +
+          TOKEN_CARRIER_SATS,
+        discovery: discoveryTicker !== undefined,
+        feeRateSatPerVb: params.feeRateSatPerVb,
+        explicitMinerFeeSats: params.minerFeeSats,
+      });
+    const result = buildMintPsbtV3({
+      network: btcNetwork(this.config.network),
+      tokenId: Buffer.from(params.tokenId, "hex"),
+      prevState: backing.state,
+      prevBacking: backing.input,
+      mintAmountAtoms: params.amountAtoms,
+      guardianXOnly: this.config.guardianXOnly,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      buyerInputs,
+      buyerCarrierScript: wallet.ordinals.scriptBuffer,
+      buyerChangeScript: wallet.payments.scriptBuffer,
+      feeScript: this.config.feeScript,
+      creatorScript,
+      minerFeeSats,
+      buyFeeBps: this.config.buyFeeBps,
+      buyFeeFlatSats: this.config.buyFeeFlatSats,
+      discoveryEnvelope: discoveryTicker
+        ? { ticker: discoveryTicker }
+        : undefined,
+    });
+    const view = this.overlayPendingBacking(
+      await this.loadView(params.tokenId),
+      params.tokenId,
+      backing,
+    );
+    const req: TransitionSignRequest = {
+      psbt: result.psbt,
+      view,
+      network: this.config.network,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      feeScript: this.config.feeScript,
+      maxMinerFeeSats: this.config.maxMinerFeeSats,
+      buyFeeBps: this.config.buyFeeBps,
+      buyFeeFlatSats: this.config.buyFeeFlatSats,
+      discoveryTicker,
+      fundingChecker: this.fundingChecker,
+    };
+    const checked = await validateMintTransitionV3({
+      ...req,
+      guardianXOnly: this.config.guardianXOnly,
+    });
+    if (!checked.ok)
+      throw new AppError(
+        "GUARDIAN_REJECTED",
+        `${checked.reason}: ${checked.detail}`,
+      );
+    const psbtBase64 = result.psbt.toBase64();
+    const digest = unsignedTxDigest(result.psbt);
+    const session = await createTxSession(this.db, {
+      network: this.config.network,
+      operation: "BACKING_BUY",
+      tokenId: params.tokenId,
+      walletScript: params.walletScript,
+      walletAddress: params.walletAddress,
+      stateHash: backing.stateHash,
+      backingTxid: backing.input.txid,
+      backingVout: backing.input.vout,
+      unsignedTxDigest: digest,
+      psbtBase64,
+      status: "BUILT",
+      expiresAtHeight: params.quoteBinding.expiresAtHeight,
+      idempotencyKey: params.idempotencyKey,
+    });
+    return {
+      sessionId: session.id,
+      psbtBase64,
+      intent: {
+        operation: "BACKING_BUY",
+        tokenId: params.tokenId,
+        tokenAmountAtoms: params.amountAtoms,
+        grossSats: result.grossSats,
+        protocolFeeSats: result.buyFeeSats,
+        creatorFeeSats: result.creatorFeeSats,
+        creatorScript: creatorScript.toString("hex"),
+        minerFeeSats: result.minerFeeSats,
+        netSats: null,
+        walletScript: wallet.payments.script,
+        ordinalsScript: wallet.ordinals.script,
+        stateHash: backing.stateHash,
+        unsignedTxDigest: digest,
+        walletDeltaSats: walletDeltaSats(result.psbt, wallet.scripts),
+      },
+    };
+  }
+  async submitBackingBuy(params: {
+    sessionId: string;
+    signedPsbtBase64: string;
+  }): Promise<{
+    txid: string;
+  }> {
+    this.assertEnabled();
+    const session = await requireTxSession(this.db, params.sessionId);
+    if (session.operation !== "BACKING_BUY")
+      throw new AppError("SESSION_STATE_INVALID", "session is not BACKING_BUY");
+    if (session.status === "BROADCAST" || session.status === "CONFIRMED")
+      return { txid: session.txid! };
+    const psbt = parsePsbt(
+      params.signedPsbtBase64,
+      btcNetwork(this.config.network),
+    );
+    if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
+      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+    for (let i = 1; i < psbt.data.inputs.length; i++) {
+      validateInputSignature(psbt, i);
+      psbt.finalizeInput(i);
+    }
+    const view = this.overlayPendingBacking(
+      await this.loadView(session.tokenId!),
+      session.tokenId!,
+      await this.loadBackingAt(
+        session.tokenId!,
+        session.backingTxid,
+        session.backingVout,
+      ),
+    );
+    const discoveryTicker = this.config.discoveryEnvelope
+      ? (await getV3TokenDetail(this.db, this.config.network, session.tokenId!))
+          ?.ticker
+      : undefined;
+    const signed = await this.transitionSigner.signMint({
+      psbt,
+      view,
+      network: this.config.network,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      feeScript: this.config.feeScript,
+      maxMinerFeeSats: this.config.maxMinerFeeSats,
+      buyFeeBps: this.config.buyFeeBps,
+      buyFeeFlatSats: this.config.buyFeeFlatSats,
+      discoveryTicker,
+      fundingChecker: this.fundingChecker,
+    });
+    if (!signed.ok)
+      throw new AppError(
+        "GUARDIAN_REJECTED",
+        `${signed.reason}: ${signed.detail}`,
+      );
+    const rawTxHex = psbt.extractTransaction().toHex();
+    const validated = await validateFinalizedMintTransaction({
+      rawTxHex,
+      view,
+      network: this.config.network,
+      guardianXOnly: this.config.guardianXOnly,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      feeScript: this.config.feeScript,
+      maxMinerFeeSats: this.config.maxMinerFeeSats,
+      buyFeeBps: this.config.buyFeeBps,
+      buyFeeFlatSats: this.config.buyFeeFlatSats,
+    });
+    if (!("rawTxHex" in validated))
+      throw new AppError("GUARDIAN_REJECTED", validated.reason);
+    const txid = await this.broadcast(validated);
+    await updateTxSession(this.db, session.id, { txid, status: "BROADCAST" });
+    return { txid };
+  }
+  async quoteRedeem(
+    tokenId: string,
+    amountAtoms: bigint,
+  ): Promise<RedeemQuote> {
+    if (amountAtoms <= 0n || amountAtoms % ATOMS_PER_TOKEN !== 0n)
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "redeem requires whole display tokens",
+      );
+    const backing = await this.loadBacking(tokenId);
+    const gross = grossRedeem(
+      backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
+      amountAtoms / ATOMS_PER_TOKEN,
+    );
+    const fee = redeemFeeSats(
+      gross,
+      this.config.redeemFeeBps,
+      this.config.redeemFeeFlatSats,
+    );
+    assertRedeemPayoutIsPayable({
+      grossSats: gross,
+      feeSats: fee,
+      payoutScript: this.config.feeScript,
+    });
+    const next = applyRedeemV2(backing.state, amountAtoms).nextState;
+    return {
+      tokenId,
+      amountAtoms,
+      stateHash: backing.stateHash,
+      backingOutpoint: { txid: backing.input.txid, vout: backing.input.vout },
+      supplyBeforeAtoms: backing.state.issuedPublicSupplyAtoms,
+      supplyAfterAtoms: next.issuedPublicSupplyAtoms,
+      backingBeforeSats: backing.state.backingSats,
+      backingAfterSats: next.backingSats,
+      grossSats: gross,
+      feeSats: fee,
+      netSats: gross - fee,
+    };
+  }
+  async buildRedeem(params: {
+    tokenId: string;
+    amountAtoms: bigint;
+    walletScript: string;
+    ordinalsScript?: string;
+    walletPublicKey?: string;
+    ordinalsPublicKey?: string;
+    walletAddress: string | null;
+    feeRateSatPerVb?: bigint;
+    minerFeeSats?: bigint;
+    idempotencyKey: string;
+    funding?: FundingCandidate[];
+  }): Promise<{
+    sessionId: string;
+    psbtBase64: string;
+    intent: IntentV3;
+  }> {
+    this.assertMutating();
+    await this.requireHealthy();
+    this.assertCanaryAllowed({
+      tokenId: params.tokenId,
+      walletScript: params.walletScript,
+    });
+    const wallet = resolveWalletIdentity(walletIdentityFrom(params));
+    const backing = await this.loadBacking(params.tokenId);
+    const tokenUtxos = await getTokenUtxosByScriptDb(
+      this.db,
+      this.config.network,
+      wallet.ordinals.script,
+    );
+    const mine = tokenUtxos.filter((u) => u.tokenId === params.tokenId);
+    const total = mine.reduce((s, u) => s + u.amountAtoms, 0n);
+    if (total < params.amountAtoms)
+      throw new AppError("TOKEN_AMOUNT_INVALID", "insufficient token balance");
+    const sorted = [...mine].sort((a, b) =>
+      a.amountAtoms !== b.amountAtoms
+        ? a.amountAtoms > b.amountAtoms
+          ? -1
+          : 1
+        : a.txid < b.txid
+          ? -1
+          : 1,
+    );
+    const selected: typeof sorted = [];
+    let running = 0n;
+    for (const u of sorted) {
+      if (running >= params.amountAtoms) break;
+      if (selected.length >= MAX_REDEEM_TOKEN_INPUTS) break;
+      selected.push(u);
+      running += u.amountAtoms;
+    }
+    if (running < params.amountAtoms) {
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        `balance is spread across too many outputs: the ${MAX_REDEEM_TOKEN_INPUTS} largest hold ` +
+          `${running} atoms, short of ${params.amountAtoms}. Consolidate with a transfer to yourself, ` +
+          `or redeem a smaller amount.`,
+      );
+    }
+    const tokenInputs: ResolvedInput[] = selected.map((u) => ({
+      txid: u.txid,
+      vout: u.vout,
+      script: Buffer.from(u.scriptPubKey, "hex"),
+      valueSats: TOKEN_CARRIER_SATS,
+      publicKey: wallet.ordinals.publicKeyBuffer,
+    }));
+    const tokenInputTotalAtoms = selected.reduce(
+      (s, u) => s + u.amountAtoms,
+      0n,
+    );
+    assertRedeemPayoutIsPayable({
+      grossSats: grossRedeem(
+        backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
+        params.amountAtoms / ATOMS_PER_TOKEN,
+      ),
+      feeSats: redeemFeeSats(
+        grossRedeem(
+          backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
+          params.amountAtoms / ATOMS_PER_TOKEN,
+        ),
+        this.config.redeemFeeBps,
+        this.config.redeemFeeFlatSats,
+      ),
+      payoutScript: wallet.payments.scriptBuffer,
+    });
+    const changeCarrierSats =
+      tokenInputTotalAtoms > params.amountAtoms ? TOKEN_CARRIER_SATS : 0n;
+    const carrierSatsIn = BigInt(tokenInputs.length) * TOKEN_CARRIER_SATS;
+    const { inputs: funderInputs, minerFeeSats } =
+      await this.resolveFundingAndFee({
+        op: "REDEEM",
+        wallet,
+        candidates: params.funding ?? [],
+        targetSats: changeCarrierSats - carrierSatsIn,
+        tokenInputs: tokenInputs.length,
+        feeRateSatPerVb: params.feeRateSatPerVb,
+        explicitMinerFeeSats: params.minerFeeSats,
+      });
+    const result = buildRedeemPsbtV3({
+      network: btcNetwork(this.config.network),
+      tokenId: Buffer.from(params.tokenId, "hex"),
+      prevState: backing.state,
+      prevBacking: backing.input,
+      redeemAmountAtoms: params.amountAtoms,
+      tokenInputs,
+      tokenInputTotalAtoms,
+      guardianXOnly: this.config.guardianXOnly,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      sellerPayoutScript: wallet.payments.scriptBuffer,
+      sellerChangeScript: wallet.ordinals.scriptBuffer,
+      feeScript: this.config.feeScript,
+      minerFeeSats,
+      funderInputs,
+      funderChangeScript: wallet.payments.scriptBuffer,
+      redeemFeeBps: this.config.redeemFeeBps,
+      redeemFeeFlatSats: this.config.redeemFeeFlatSats,
+    });
+    const view = this.overlayPendingBacking(
+      await this.loadView(
+        params.tokenId,
+        selected.map((u) => ({ txid: u.txid, vout: u.vout })),
+      ),
+      params.tokenId,
+      backing,
+    );
+    const req: TransitionSignRequest = {
+      psbt: result.psbt,
+      view,
+      network: this.config.network,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      feeScript: this.config.feeScript,
+      maxMinerFeeSats: this.config.maxMinerFeeSats,
+      redeemFeeBps: this.config.redeemFeeBps,
+      redeemFeeFlatSats: this.config.redeemFeeFlatSats,
+      fundingChecker: this.fundingChecker,
+    };
+    const checked = await validateRedeemTransitionV3({
+      ...req,
+      guardianXOnly: this.config.guardianXOnly,
+    });
+    if (!checked.ok)
+      throw new AppError(
+        "GUARDIAN_REJECTED",
+        `${checked.reason}: ${checked.detail}`,
+      );
+    const psbtBase64 = result.psbt.toBase64();
+    const digest = unsignedTxDigest(result.psbt);
+    const session = await createTxSession(this.db, {
+      network: this.config.network,
+      operation: "REDEEM",
+      tokenId: params.tokenId,
+      walletScript: params.walletScript,
+      walletAddress: params.walletAddress,
+      stateHash: backing.stateHash,
+      backingTxid: backing.input.txid,
+      backingVout: backing.input.vout,
+      unsignedTxDigest: digest,
+      psbtBase64,
+      status: "BUILT",
+      expiresAtHeight: null,
+      idempotencyKey: params.idempotencyKey,
+    });
+    return {
+      sessionId: session.id,
+      psbtBase64,
+      intent: {
+        operation: "REDEEM",
+        tokenId: params.tokenId,
+        tokenAmountAtoms: params.amountAtoms,
+        grossSats: result.grossSats,
+        protocolFeeSats: result.redeemFeeSats,
+        minerFeeSats: result.minerFeeSats,
+        netSats: result.netSats,
+        walletScript: wallet.payments.script,
+        ordinalsScript: wallet.ordinals.script,
+        stateHash: backing.stateHash,
+        unsignedTxDigest: digest,
+        walletDeltaSats: walletDeltaSats(result.psbt, wallet.scripts),
+      },
+    };
+  }
+  async submitRedeem(params: {
+    sessionId: string;
+    signedPsbtBase64: string;
+  }): Promise<{
+    txid: string;
+  }> {
+    this.assertEnabled();
+    const session = await requireTxSession(this.db, params.sessionId);
+    if (session.operation !== "REDEEM")
+      throw new AppError("SESSION_STATE_INVALID", "session is not REDEEM");
+    if (session.status === "BROADCAST" || session.status === "CONFIRMED")
+      return { txid: session.txid! };
+    const psbt = parsePsbt(
+      params.signedPsbtBase64,
+      btcNetwork(this.config.network),
+    );
+    if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
+      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+    for (let i = 1; i < psbt.data.inputs.length; i++) {
+      validateInputSignature(psbt, i);
+      psbt.finalizeInput(i);
+    }
+    const spent = psbt.txInputs.map((i) => ({
+      txid: Buffer.from(i.hash).reverse().toString("hex"),
+      vout: i.index,
+    }));
+    const view = this.overlayPendingBacking(
+      await this.loadView(session.tokenId!, spent),
+      session.tokenId!,
+      await this.loadBackingAt(
+        session.tokenId!,
+        session.backingTxid,
+        session.backingVout,
+      ),
+    );
+    const signed = await this.transitionSigner.signRedeem({
+      psbt,
+      view,
+      network: this.config.network,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      feeScript: this.config.feeScript,
+      maxMinerFeeSats: this.config.maxMinerFeeSats,
+      redeemFeeBps: this.config.redeemFeeBps,
+      redeemFeeFlatSats: this.config.redeemFeeFlatSats,
+      fundingChecker: this.fundingChecker,
+    });
+    if (!signed.ok)
+      throw new AppError(
+        "GUARDIAN_REJECTED",
+        `${signed.reason}: ${signed.detail}`,
+      );
+    const rawTxHex = psbt.extractTransaction().toHex();
+    const validated = await validateFinalizedRedeemTransaction({
+      rawTxHex,
+      view,
+      network: this.config.network,
+      guardianXOnly: this.config.guardianXOnly,
+      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+      recoveryProfile: this.config.recoveryProfile,
+      feeScript: this.config.feeScript,
+      maxMinerFeeSats: this.config.maxMinerFeeSats,
+      redeemFeeBps: this.config.redeemFeeBps,
+      redeemFeeFlatSats: this.config.redeemFeeFlatSats,
+    });
+    if (!("rawTxHex" in validated))
+      throw new AppError("GUARDIAN_REJECTED", validated.reason);
+    const txid = await this.broadcast(validated);
+    await updateTxSession(this.db, session.id, { txid, status: "BROADCAST" });
+    return { txid };
+  }
+  async buildTransfer(params: {
+    tokenId: string;
+    amountAtoms: bigint;
+    recipientScript: string;
+    walletScript: string;
+    ordinalsScript?: string;
+    walletPublicKey?: string;
+    ordinalsPublicKey?: string;
+    walletAddress: string | null;
+    funding: FundingCandidate[];
+    feeRateSatPerVb?: bigint;
+    minerFeeSats?: bigint;
+    idempotencyKey: string;
+  }): Promise<{
+    sessionId: string;
+    psbtBase64: string;
+    intent: IntentV3;
+  }> {
+    this.assertMutating();
+    await this.requireHealthy();
+    const wallet = resolveWalletIdentity(walletIdentityFrom(params));
+    const tokenUtxos = await getTokenUtxosByScriptDb(
+      this.db,
+      this.config.network,
+      wallet.ordinals.script,
+    );
+    const mine = tokenUtxos.filter((u) => u.tokenId === params.tokenId);
+    const total = mine.reduce((s, u) => s + u.amountAtoms, 0n);
+    if (total < params.amountAtoms)
+      throw new AppError("TOKEN_AMOUNT_INVALID", "insufficient token balance");
+    const sorted = [...mine].sort((a, b) =>
+      a.amountAtoms !== b.amountAtoms
+        ? a.amountAtoms > b.amountAtoms
+          ? -1
+          : 1
+        : a.txid < b.txid
+          ? -1
+          : 1,
+    );
+    const selected: typeof sorted = [];
+    let runningAtoms = 0n;
+    for (const u of sorted) {
+      if (runningAtoms >= params.amountAtoms) break;
+      if (selected.length >= MAX_TRANSFER_TOKEN_INPUTS) break;
+      selected.push(u);
+      runningAtoms += u.amountAtoms;
+    }
+    if (runningAtoms < params.amountAtoms) {
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        `balance is spread across too many outputs: the ${MAX_TRANSFER_TOKEN_INPUTS} largest hold ` +
+          `${runningAtoms} atoms, short of ${params.amountAtoms}. Consolidate with a transfer to ` +
+          `yourself, or send a smaller amount.`,
+      );
+    }
+    const tokenInputs: ResolvedInput[] = selected.map((u) => ({
+      txid: u.txid,
+      vout: u.vout,
+      script: Buffer.from(u.scriptPubKey, "hex"),
+      valueSats: TOKEN_CARRIER_SATS,
+      publicKey: wallet.ordinals.publicKeyBuffer,
+    }));
+    const tokenInputTotalAtoms = selected.reduce(
+      (s, u) => s + u.amountAtoms,
+      0n,
+    );
+    const changeAtoms = tokenInputTotalAtoms - params.amountAtoms;
+    const tokenOutputs: {
+      script: Buffer;
+      amountAtoms: bigint;
+    }[] = [
+      {
+        script: Buffer.from(params.recipientScript, "hex"),
+        amountAtoms: params.amountAtoms,
+      },
+    ];
+    if (changeAtoms > 0n)
+      tokenOutputs.push({
+        script: wallet.ordinals.scriptBuffer,
+        amountAtoms: changeAtoms,
+      });
+    const carrierSatsOut = BigInt(tokenOutputs.length) * TOKEN_CARRIER_SATS;
+    const carrierSatsIn = BigInt(tokenInputs.length) * TOKEN_CARRIER_SATS;
+    const { inputs: funderInputs, minerFeeSats } =
+      await this.resolveFundingAndFee({
+        op: "TRANSFER",
+        wallet,
+        candidates: params.funding,
+        targetSats: carrierSatsOut - carrierSatsIn,
+        tokenInputs: tokenInputs.length,
+        recipientCarriers: tokenOutputs.length,
+        feeRateSatPerVb: params.feeRateSatPerVb,
+        explicitMinerFeeSats: params.minerFeeSats,
+      });
+    const result = buildTransferPsbtV2({
+      network: btcNetwork(this.config.network),
+      tokenId: Buffer.from(params.tokenId, "hex"),
+      tokenInputs,
+      tokenInputTotalAtoms,
+      tokenOutputs,
+      funderInputs,
+      funderChangeScript: wallet.payments.scriptBuffer,
+      btcOutputs: [],
+      minerFeeSats,
+    });
+    const psbtBase64 = result.psbt.toBase64();
+    const digest = unsignedTxDigest(result.psbt);
+    const session = await createTxSession(this.db, {
+      network: this.config.network,
+      operation: "TRANSFER",
+      tokenId: params.tokenId,
+      walletScript: params.walletScript,
+      walletAddress: params.walletAddress,
+      stateHash: null,
+      backingTxid: null,
+      backingVout: null,
+      unsignedTxDigest: digest,
+      psbtBase64,
+      status: "BUILT",
+      expiresAtHeight: null,
+      idempotencyKey: params.idempotencyKey,
+    });
+    return {
+      sessionId: session.id,
+      psbtBase64,
+      intent: {
+        operation: "TRANSFER",
+        tokenId: params.tokenId,
+        tokenAmountAtoms: params.amountAtoms,
+        grossSats: null,
+        protocolFeeSats: null,
+        minerFeeSats: result.minerFeeSats,
+        netSats: null,
+        walletScript: wallet.payments.script,
+        ordinalsScript: wallet.ordinals.script,
+        stateHash: null,
+        unsignedTxDigest: digest,
+        walletDeltaSats: walletDeltaSats(result.psbt, wallet.scripts),
+      },
+    };
+  }
+  async submitTransfer(params: {
+    sessionId: string;
+    signedPsbtBase64: string;
+  }): Promise<{
+    txid: string;
+  }> {
+    this.assertEnabled();
+    const session = await requireTxSession(this.db, params.sessionId);
+    if (session.operation !== "TRANSFER")
+      throw new AppError("SESSION_STATE_INVALID", "session is not TRANSFER");
+    if (session.status === "BROADCAST" || session.status === "CONFIRMED")
+      return { txid: session.txid! };
+    const psbt = parsePsbt(
+      params.signedPsbtBase64,
+      btcNetwork(this.config.network),
+    );
+    if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
+      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+    for (let i = 0; i < psbt.data.inputs.length; i++)
+      validateInputSignature(psbt, i);
+    psbt.finalizeAllInputs();
+    const rawTxHex = psbt.extractTransaction().toHex();
+    const view = this.overlayPendingBacking(
+      await this.loadView(session.tokenId!),
+      session.tokenId!,
+      await this.loadBackingAt(
+        session.tokenId!,
+        session.backingTxid,
+        session.backingVout,
+      ),
+    );
+    const validated = validateFinalizedTransferTransaction({
+      rawTxHex,
+      view,
+      maxMinerFeeSats: this.config.maxMinerFeeSats,
+    });
+    if (!("rawTxHex" in validated))
+      throw new AppError("GUARDIAN_REJECTED", validated.reason);
+    const txid = await this.broadcast(validated);
+    await updateTxSession(this.db, session.id, { txid, status: "BROADCAST" });
+    return { txid };
+  }
+  async txStatus(txid: string) {
+    const rows = await this.db
+      .select()
+      .from(schema.coveV3AppTransactions)
+      .where(
+        and(
+          eq(schema.coveV3AppTransactions.network, this.config.network),
+          eq(schema.coveV3AppTransactions.txid, txid),
+        ),
+      );
+    const session = rows[0] ?? null;
+    let mempool = false;
+    try {
+      await this.provider.getRawTransaction(txid);
+      mempool = true;
+    } catch {
+      mempool = false;
+    }
+    let confirmedHeight: bigint | null = null;
+    const evRows = await this.db
+      .select()
+      .from(schema.coveV3Events)
+      .where(
+        and(
+          eq(schema.coveV3Events.network, this.config.network),
+          eq(schema.coveV3Events.txid, txid),
+          eq(schema.coveV3Events.canonical, true),
+        ),
+      );
+    if (evRows.length > 0) confirmedHeight = evRows[0]!.blockHeight;
+    return { txid, session, mempool, confirmedHeight };
+  }
+  async reconcileAppSessions(): Promise<{
+    confirmed: number;
+  }> {
+    let confirmed = 0;
+    const pending = await this.db
+      .select()
+      .from(schema.coveV3AppTransactions)
+      .where(
+        and(
+          eq(schema.coveV3AppTransactions.network, this.config.network),
+          eq(schema.coveV3AppTransactions.status, "BROADCAST"),
+        ),
+      );
+    for (const s of pending) {
+      if (!s.txid) continue;
+      const ev = await this.db
+        .select()
+        .from(schema.coveV3Events)
+        .where(
+          and(
+            eq(schema.coveV3Events.network, this.config.network),
+            eq(schema.coveV3Events.txid, s.txid),
+            eq(schema.coveV3Events.canonical, true),
+          ),
+        );
+      if (ev.length > 0) {
+        await updateTxSession(this.db, s.id, { status: "CONFIRMED" });
+        confirmed++;
+      } else {
+        try {
+          await this.provider.getRawTransaction(s.txid);
+        } catch {
+          await updateTxSession(this.db, s.id, {
+            status: "FAILED",
+            errorCode: "MEMPOOL_EVICTED",
+          });
+        }
+      }
+    }
+    return { confirmed };
+  }
+  async prepareListing(params: {
+    tokenId: string;
+    sourceTxid: string;
+    sourceVout: number;
+    amountAtoms: bigint;
+    totalPriceSats: bigint;
+    expiryBlocks?: bigint;
+    expiryHeight?: bigint;
+    walletScript: string;
+    ordinalsScript?: string;
+    walletPublicKey?: string;
+    ordinalsPublicKey?: string;
+    nonceHex: string;
+  }): Promise<{
+    listing: ListingV1;
+    listingId: string;
+    listingPsbtBase64: string;
+    expiryHeight: bigint;
+  }> {
+    this.assertEnabled();
+    const wallet = resolveWalletIdentity(walletIdentityFrom(params));
+    const utxoRows = await this.db
+      .select()
+      .from(schema.coveV3TokenUtxos)
+      .where(
+        and(
+          eq(schema.coveV3TokenUtxos.network, this.config.network),
+          eq(schema.coveV3TokenUtxos.txid, params.sourceTxid),
+          eq(schema.coveV3TokenUtxos.vout, params.sourceVout),
+          eq(schema.coveV3TokenUtxos.tokenId, params.tokenId),
+          eq(schema.coveV3TokenUtxos.scriptPubKey, wallet.ordinals.script),
+          eq(schema.coveV3TokenUtxos.canonical, true),
+          isNull(schema.coveV3TokenUtxos.spentByTxid),
+        ),
+      );
+    const u = utxoRows[0];
+    if (u && u.amountAtoms !== params.amountAtoms) {
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "a listing sells a whole token carrier; split off the amount first",
+      );
+    }
+    const sourceAmountAtoms = u ? u.amountAtoms : params.amountAtoms;
+    const cursor = await this.db
+      .select()
+      .from(schema.coveV3Cursor)
+      .where(eq(schema.coveV3Cursor.network, this.config.network));
+    const tip = cursor[0]?.height ?? 0n;
+    const nonce = Buffer.from(params.nonceHex, "hex");
+    if (nonce.length !== 32)
+      throw new AppError("TOKEN_AMOUNT_INVALID", "nonce must be 32 bytes");
+    const expiryHeight =
+      params.expiryBlocks !== undefined && params.expiryBlocks > 0n
+        ? tip + params.expiryBlocks
+        : (params.expiryHeight ?? tip + DEFAULT_LISTING_BLOCKS);
+    if (expiryHeight <= tip) {
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "listing would already be expired",
+      );
+    }
+    if (expiryHeight - tip > this.config.maxListingBlocks) {
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        `a listing may stay open for at most ${this.config.maxListingBlocks} blocks ` +
+          `(about ${this.config.maxListingBlocks / 144n} days)`,
+      );
+    }
+    const listing: ListingV1 = {
+      orderVersion: 1,
+      chainIdentity: this.config.chainIdentity,
+      tokenId: params.tokenId,
+      sellerTokenScript: wallet.ordinals.script,
+      sellerPayoutScript: wallet.payments.script,
+      sellerTokenChangeScript: wallet.ordinals.script,
+      sourceTxid: params.sourceTxid,
+      sourceVout: params.sourceVout,
+      sourceAmountAtoms,
+      amountAtoms: sourceAmountAtoms,
+      totalPriceSats: params.totalPriceSats,
+      creationHeight: tip,
+      expiryHeight,
+      nonce: nonce.toString("hex"),
+    };
+    const listingId = listingIdOf(listing);
+    const listingPsbtBase64 = await this.market.buildListingPsbtFor(
+      listing,
+      wallet.ordinals.publicKey || undefined,
+    );
+    return { listing, listingId, listingPsbtBase64, expiryHeight };
+  }
+  createListing(
+    listing: ListingV1,
+    presignedPsbtBase64: string,
+    sellerTokenPublicKey?: string,
+  ) {
+    this.assertMutating();
+    this.assertCanaryAllowed({
+      tokenId: listing.tokenId,
+      walletScript: listing.sellerPayoutScript,
+    });
+    return this.market.createListing({
+      ...listing,
+      presignedPsbtBase64,
+      sellerTokenPublicKey,
+    });
+  }
+  prepareCancellation(listingId: string, nonceHex: string) {
+    const cancelNonce = Buffer.from(nonceHex, "hex");
+    if (cancelNonce.length !== 32)
+      throw new AppError("TOKEN_AMOUNT_INVALID", "nonce must be 32 bytes");
+    const c = {
+      version: 1 as const,
+      listingId,
+      cancelNonce: cancelNonce.toString("hex"),
+    };
+    return {
+      cancelNonce: c.cancelNonce,
+      cancelHash: cancellationHashOf(c),
+      message: cancellationMessageToSign(c),
+    };
+  }
+  cancelListing(listingId: string, nonceHex: string, signatureB64: string) {
+    this.assertMutating();
+    return this.market.cancelListing(
+      listingId,
+      Buffer.from(nonceHex, "hex").toString("hex"),
+      signatureB64,
+    );
+  }
+  reserveListing(input: Parameters<MarketService["reserveListing"]>[0]) {
+    this.assertMutating();
+    return this.market.reserveListing(input);
+  }
+  preflightReserveListing(
+    input: Parameters<MarketService["preflightReserveListing"]>[0],
+  ) {
+    this.assertMutating();
+    return this.market.preflightReserveListing(input);
+  }
+  buildFillPsbt(
+    fillId: string,
+    fee: {
+      feeRateSatPerVb?: bigint;
+      minerFeeSats?: bigint;
+    },
+  ) {
+    this.assertMutating();
+    return this.market.buildFillPsbt(fillId, fee);
+  }
+  async submitBuyerSignature(
+    fillId: string,
+    psbtB64: string,
+  ): Promise<{
+    txid: string;
+  }> {
+    this.assertMutating();
+    await this.market.submitBuyerSignedPsbt(fillId, psbtB64);
+    return this.finalizeAndBroadcastFill(fillId);
+  }
+  finalizeFill(fillId: string) {
+    this.assertMutating();
+    return this.market.finalizeP2PFill(fillId);
+  }
+  broadcastFill(validated: Parameters<MarketService["broadcastP2PFill"]>[0]) {
+    this.assertMutating();
+    return this.market.broadcastP2PFill(validated);
+  }
+  getFill(fillId: string) {
+    return this.db
+      .select()
+      .from(schema.coveV3MarketFills)
+      .where(eq(schema.coveV3MarketFills.id, fillId));
+  }
+  async finalizeAndBroadcastFill(fillId: string): Promise<{
+    txid: string;
+  }> {
+    this.assertMutating();
+    await this.requireHealthy();
+    const fills = await this.getFill(fillId);
+    const fill = fills[0];
+    if (!fill) throw new AppError("STATE_CHANGED", "fill not found");
+    this.assertCanaryAllowed({
+      tokenId: fill.tokenId,
+      walletScript: fill.buyerTokenScript,
+    });
+    const validated = await this.market.finalizeP2PFill(fillId);
+    return this.market.broadcastP2PFill(validated);
+  }
+  getBuyRoutes(tokenId: string, amountAtoms: bigint) {
+    return getBuyRoutes(this.db, this.config.network, tokenId, amountAtoms, {
+      buyFeeBps: this.config.buyFeeBps,
+      p2pFeeBps: this.market.config.p2pFeeBps,
+      buyFeeFlatSats: this.config.buyFeeFlatSats,
+      p2pFeeMinSats: this.market.config.p2pFeeMinSats,
+    });
+  }
+  getSellOptions(tokenId: string, walletScript: string) {
+    return getSellOptions(
+      this.db,
+      this.config.network,
+      tokenId,
+      walletScript,
+      this.config.redeemFeeBps,
+    );
+  }
+  async listListings(
+    opts: {
+      tokenId?: string;
+      limit?: number;
+    } = {},
+  ) {
+    const limit = Math.min(opts.limit ?? 100, 200);
+    const base = [
+      eq(schema.coveV3MarketListings.network, this.config.network),
+      eq(schema.coveV3MarketListings.status, "ACTIVE"),
+    ];
+    const cond = opts.tokenId
+      ? and(...base, eq(schema.coveV3MarketListings.tokenId, opts.tokenId))
+      : and(...base);
+    const rows = await this.db
+      .select({
+        listing: schema.coveV3MarketListings,
+        ticker: schema.coveV3Tokens.ticker,
+      })
+      .from(schema.coveV3MarketListings)
+      .leftJoin(
+        schema.coveV3Tokens,
+        and(
+          eq(schema.coveV3Tokens.network, schema.coveV3MarketListings.network),
+          eq(schema.coveV3Tokens.tokenId, schema.coveV3MarketListings.tokenId),
+          eq(schema.coveV3Tokens.canonical, true),
+        ),
+      )
+      .where(cond)
+      .limit(limit);
+    return rows.map((r) => ({ ...publicListing(r.listing), ticker: r.ticker }));
+  }
+  private async broadcast(
+    validated: ValidatedCoveTransaction,
+  ): Promise<string> {
+    const accept = await this.provider.testMempoolAccept(validated.rawTxHex);
+    if (!accept.allowed)
+      throw new AppError(
+        "MEMPOOL_REJECTED",
+        accept.rejectReason ?? "testmempoolaccept rejected",
+      );
+    const txid = await this.provider.broadcastTransaction(validated.rawTxHex);
+    if (txid !== validated.txid)
+      throw new AppError("BROADCAST_FAILED", "broadcast txid mismatch");
+    return txid;
+  }
+}

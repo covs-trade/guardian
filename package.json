@@ -1,0 +1,33 @@
+{
+  "name": "cove-guardian-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": { "node": ">=20.0.0" },
+  "scripts": {
+    "start": "pnpm --filter @crclaunch/guardian start",
+    "dev": "pnpm --filter @crclaunch/guardian dev",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm --filter @crclaunch/guardian test",
+    "build:rust": "pnpm --filter @crclaunch/cove-simplicity build:rust",
+    "db:migrate": "pnpm --filter @crclaunch/db db:migrate"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0"
+  },
+  "pnpm": { "overrides": {
+    "bitcoinjs-lib": "6.1.8",
+    "axios@>=1.0.0 <1.20.0": "^1.20.0",
+    "ws@>=8.0.0 <8.21.0": "^8.21.3",
+    "postcss@<8.5.18": "^8.5.28"
+  } },
+  "license": "MIT"
+}

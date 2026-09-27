@@ -1,0 +1,28 @@
+{
+  "name": "@crclaunch/cove-covenant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@crclaunch/cove-economics": "workspace:*",
+    "@crclaunch/cove-wire": "workspace:*",
+    "@crclaunch/curve": "workspace:*",
+    "bitcoinjs-lib": "^6.1.7",
+    "tiny-secp256k1": "^2.2.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

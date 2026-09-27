@@ -1,0 +1,34 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn main() {
+    let amount: u64 = witness::AMOUNT;
+    let prev_supply: u64 = witness::PREV_SUPPLY;
+    let next_supply: u64 = witness::NEXT_SUPPLY;
+    let prev_reserve: u64 = witness::PREV_RESERVE;
+    let next_reserve: u64 = witness::NEXT_RESERVE;
+    let contribution: u64 = witness::CONTRIBUTION;
+
+
+    let (carry, sum_supply): (bool, u64) = jet::add_64(prev_supply, amount);
+    assert!(jet::le_64(prev_supply, sum_supply));
+    assert!(jet::eq_64(sum_supply, next_supply));
+
+    assert!(jet::le_64(next_supply, 21_000_000));
+
+    assert!(jet::lt_64(0, amount));
+
+    let (carry2, sum_reserve): (bool, u64) = jet::add_64(prev_reserve, contribution);
+    assert!(jet::le_64(prev_reserve, sum_reserve));
+    assert!(jet::eq_64(sum_reserve, next_reserve));
+}

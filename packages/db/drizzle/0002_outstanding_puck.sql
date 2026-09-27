@@ -1,0 +1,2 @@
+CREATE INDEX IF NOT EXISTS "cove_blocks_hash_idx" ON "cove_blocks" USING btree ("network","hash");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "cove_ops_block_height_idx" ON "cove_operations" USING btree ("network","block_height");

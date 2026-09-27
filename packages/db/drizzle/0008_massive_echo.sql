@@ -1,0 +1,1 @@
+ALTER TABLE "cove_v3_tokens" ADD COLUMN "creator_script" text DEFAULT '' NOT NULL;

@@ -1,0 +1,1 @@
+ALTER TABLE "cove_v3_token_utxos" ADD COLUMN "burned" boolean DEFAULT false NOT NULL;
