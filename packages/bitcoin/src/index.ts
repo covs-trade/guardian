@@ -20,6 +20,10 @@ export {
 } from "./decoder.js";
 export {
   CoreRpcProvider,
+  RpcError,
+  isRpcNotFound,
+  type RpcReadOptions,
+  type TransactionObservation,
   btcPerKvbToSatPerVb,
   testMempoolAcceptParams,
   type BitcoinChainProvider,

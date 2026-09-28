@@ -76,6 +76,8 @@ async function checkFundingInputs(
   params: ValidateParams,
   indices: number[],
 ): Promise<ValidationResult | null> {
+  const checker =
+    params.fundingChecker.forValidation?.() ?? params.fundingChecker;
   for (const i of indices) {
     const txIn = params.psbt.txInputs[i]!;
     const outpoint = {
@@ -94,14 +96,10 @@ async function checkFundingInputs(
         "FUNDING_PREVOUT_MISMATCH",
         `funding input ${outpoint.txid}:${outpoint.vout} has no witness UTXO`,
       );
-    const verdict = await params.fundingChecker.check(
-      outpoint,
-      params.view.cursorHeight,
-      {
-        script: prevout.script,
-        valueSats: BigInt(prevout.value),
-      },
-    );
+    const verdict = await checker.check(outpoint, params.view.cursorHeight, {
+      script: prevout.script,
+      valueSats: BigInt(prevout.value),
+    });
     if (!verdict.ok) return reject(verdict.code, verdict.detail);
   }
   return null;

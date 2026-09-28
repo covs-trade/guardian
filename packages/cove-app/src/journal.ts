@@ -71,11 +71,21 @@ export class PostgresSigningJournal implements SigningJournalStore {
     backingTxid: string;
     backingVout: number;
     unsignedTxDigest: string;
+    signingResult?: {
+      psbtBase64: string;
+      resultJson: string;
+      auditHash: string;
+    };
   }): Promise<void> {
     const rows = await this.db
       .update(schema.coveV3SigningJournal)
       .set({
         signedAt: sql`COALESCE(${schema.coveV3SigningJournal.signedAt}, clock_timestamp())`,
+        ...(params.signingResult
+          ? {
+              signingResult: sql`COALESCE(${schema.coveV3SigningJournal.signingResult}, ${JSON.stringify(params.signingResult)}::jsonb)`,
+            }
+          : {}),
       })
       .where(
         and(
@@ -91,6 +101,27 @@ export class PostgresSigningJournal implements SigningJournalStore {
       throw new Error(
         "signing reservation lost before signature was committed",
       );
+  }
+  async readSigned(params: {
+    network: string;
+    backingTxid: string;
+    backingVout: number;
+    unsignedTxDigest: string;
+  }) {
+    const [row] = await this.db
+      .select({ result: schema.coveV3SigningJournal.signingResult })
+      .from(schema.coveV3SigningJournal)
+      .where(
+        and(
+          this.rowKey(params),
+          eq(
+            schema.coveV3SigningJournal.unsignedTxDigest,
+            params.unsignedTxDigest,
+          ),
+          sql`${schema.coveV3SigningJournal.signedAt} is not null`,
+        ),
+      );
+    return row?.result ?? null;
   }
   async committedDigest(
     network: string,

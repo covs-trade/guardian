@@ -558,6 +558,27 @@ export const coveV3Blocks = pgTable(
     index("cove_v3_blocks_hash_idx").on(t.network, t.hash),
   ],
 );
+export const coveV3Runtime = pgTable("cove_v3_runtime", {
+  network: text("network").primaryKey(),
+  coreHeight: atoms("core_height")
+    .notNull()
+    .default(sql`0`),
+  coreTip: text("core_tip").notNull().default(""),
+  coreReachable: boolean("core_reachable").notNull().default(false),
+  chainObservedAt: timestamp("chain_observed_at", { withTimezone: true }),
+  feeRates: jsonb("fee_rates").$type<{
+    floorSatPerVb: string;
+    ceilingSatPerVb: string;
+    estimated: boolean;
+    tiers: {
+      key: "eco" | "standard" | "priority";
+      label: string;
+      blocks: number;
+      satPerVb: string;
+    }[];
+  }>(),
+  feesObservedAt: timestamp("fees_observed_at", { withTimezone: true }),
+});
 export const coveV3Tokens = pgTable(
   "cove_v3_tokens",
   {
@@ -631,6 +652,9 @@ export const coveV3TokenUtxos = pgTable(
     uniqueIndex("cove_v3_utxo_outpoint_uq").on(t.network, t.txid, t.vout),
     index("cove_v3_utxo_token_idx").on(t.network, t.tokenId),
     index("cove_v3_utxo_script_idx").on(t.network, t.scriptPubKey),
+    index("cove_v3_utxo_live_script_idx")
+      .on(t.network, t.scriptPubKey, t.txid, t.vout)
+      .where(sql`${t.canonical} and ${t.spentByTxid} is null`),
   ],
 );
 export const coveV3Events = pgTable(
@@ -660,6 +684,28 @@ export const coveV3Events = pgTable(
     uniqueIndex("cove_v3_events_txid_uq").on(t.network, t.txid),
     index("cove_v3_events_block_idx").on(t.network, t.blockHeight),
     index("cove_v3_events_token_idx").on(t.network, t.tokenId),
+    index("cove_v3_events_price_time_idx")
+      .on(
+        t.network,
+        t.tokenId,
+        t.createdAt.desc(),
+        t.blockHeight.desc(),
+        t.txid.desc(),
+      )
+      .where(
+        sql`${t.canonical} and ${t.valid} and ${t.operation} in ('MINT','REDEEM') and ${t.grossSats} is not null`,
+      ),
+    index("cove_v3_events_positive_price_time_idx")
+      .on(
+        t.network,
+        t.tokenId,
+        t.createdAt.desc(),
+        t.blockHeight.desc(),
+        t.txid.desc(),
+      )
+      .where(
+        sql`${t.canonical} and ${t.valid} and ${t.operation} in ('MINT','REDEEM') and ${t.amountAtoms} > 0 and ${t.grossSats}::numeric * 10000000000000 >= ${t.amountAtoms}`,
+      ),
   ],
 );
 export const coveV3Cursor = pgTable(
@@ -728,6 +774,21 @@ export const coveV3MarketListings = pgTable(
       t.network,
       t.tokenId,
       t.status,
+    ),
+    index("cove_v3_market_listings_route_idx")
+      .on(t.network, t.tokenId, t.amountAtoms, t.totalPriceSats, t.listingId)
+      .where(sql`${t.status} = 'ACTIVE'`),
+    index("cove_v3_market_listings_seller_token_idx").on(
+      t.network,
+      t.sellerTokenScript,
+      t.createdAt.desc(),
+      t.listingId.desc(),
+    ),
+    index("cove_v3_market_listings_seller_payout_idx").on(
+      t.network,
+      t.sellerPayoutScript,
+      t.createdAt.desc(),
+      t.listingId.desc(),
     ),
     index("cove_v3_market_listings_status_created_idx").on(
       t.network,
@@ -800,6 +861,18 @@ export const coveV3MarketFills = pgTable(
   (t) => [
     index("cove_v3_market_fills_listing_idx").on(t.listingId),
     index("cove_v3_market_fills_status_idx").on(t.network, t.status),
+    index("cove_v3_market_fills_buyer_token_idx").on(
+      t.network,
+      t.buyerTokenScript,
+      t.createdAt.desc(),
+      t.id.desc(),
+    ),
+    index("cove_v3_market_fills_buyer_change_idx").on(
+      t.network,
+      t.buyerChangeScript,
+      t.createdAt.desc(),
+      t.id.desc(),
+    ),
     uniqueIndex("cove_v3_market_fills_txid_uq")
       .on(t.network, t.txid)
       .where(sql`${t.txid} IS NOT NULL`),
@@ -853,6 +926,26 @@ export const coveV3MarketTrades = pgTable(
       t.tokenId,
       t.blockHeight,
     ),
+    index("cove_v3_market_trades_price_time_idx")
+      .on(
+        t.network,
+        t.tokenId,
+        t.createdAt.desc(),
+        t.blockHeight.desc(),
+        t.txid.desc(),
+      )
+      .where(sql`${t.canonical}`),
+    index("cove_v3_market_trades_positive_price_time_idx")
+      .on(
+        t.network,
+        t.tokenId,
+        t.createdAt.desc(),
+        t.blockHeight.desc(),
+        t.txid.desc(),
+      )
+      .where(
+        sql`${t.canonical} and ${t.amountAtoms} > 0 and ${t.totalPriceSats}::numeric * 10000000000000 >= ${t.amountAtoms}`,
+      ),
   ],
 );
 export const coveV3MarketEvents = pgTable(
@@ -937,7 +1030,7 @@ export const coveV3AppTransactions = pgTable(
       t.operation,
       t.idempotencyKey,
     ),
-    uniqueIndex("cove_v3_app_tx_txid_uq")
+    index("cove_v3_app_tx_txid_idx")
       .on(t.network, t.txid)
       .where(sql`${t.txid} IS NOT NULL`),
     index("cove_v3_app_tx_status_idx").on(t.network, t.status),
@@ -993,6 +1086,53 @@ export const coveV3GuardianAudit = pgTable(
     ),
   ],
 );
+export const coveV3Submissions = pgTable(
+  "cove_v3_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    network: text("network").notNull(),
+    sourceKind: text("source_kind").$type<"APP" | "FILL">().notNull(),
+    sourceId: uuid("source_id").notNull(),
+    operation: text("operation").notNull(),
+    tokenId: text("token_id"),
+    backingTxid: text("backing_txid"),
+    backingVout: integer("backing_vout"),
+    unsignedTxDigest: text("unsigned_tx_digest").notNull(),
+    walletPsbtBase64: text("wallet_psbt_base64").notNull(),
+    rawTxHex: text("raw_tx_hex"),
+    txid: text("txid"),
+    phase: text("phase")
+      .$type<"SIGNING" | "READY" | "BROADCAST" | "RECOVERY_REQUIRED">()
+      .notNull()
+      .default("SIGNING"),
+    leaseToken: uuid("lease_token"),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    attempts: integer("attempts").notNull().default(0),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("cove_v3_submission_source_uq").on(
+      t.network,
+      t.sourceKind,
+      t.sourceId,
+    ),
+    index("cove_v3_submission_txid_idx")
+      .on(t.network, t.txid)
+      .where(sql`${t.txid} is not null`),
+    index("cove_v3_submission_due_idx")
+      .on(t.network, t.nextAttemptAt, t.id)
+      .where(sql`${t.phase} <> 'BROADCAST'`),
+  ],
+);
 export const coveV3SigningJournal = pgTable(
   "cove_v3_signing_journal",
   {
@@ -1002,6 +1142,11 @@ export const coveV3SigningJournal = pgTable(
     backingVout: integer("backing_vout").notNull(),
     unsignedTxDigest: text("unsigned_tx_digest").notNull(),
     signatureHash: text("signature_hash"),
+    signingResult: jsonb("signing_result").$type<{
+      psbtBase64: string;
+      resultJson: string;
+      auditHash: string;
+    }>(),
     signedAt: timestamp("signed_at", { withTimezone: true }),
     committedAt: timestamp("committed_at", { withTimezone: true })
       .notNull()

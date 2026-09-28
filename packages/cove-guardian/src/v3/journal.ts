@@ -88,6 +88,11 @@ export function verifyGuardianAuditChain(
   return true;
 }
 export type SigningReservation = "RESERVED" | "IDEMPOTENT" | "CONFLICT";
+export interface StoredSigningResult {
+  psbtBase64: string;
+  resultJson: string;
+  auditHash: string;
+}
 export const SIGNING_JOURNAL_TTL_MS = 30 * 60 * 1000;
 export interface SigningJournalStore {
   reserve(params: {
@@ -101,7 +106,14 @@ export interface SigningJournalStore {
     backingTxid: string;
     backingVout: number;
     unsignedTxDigest: string;
+    signingResult?: StoredSigningResult;
   }): Promise<void>;
+  readSigned?(params: {
+    network: string;
+    backingTxid: string;
+    backingVout: number;
+    unsignedTxDigest: string;
+  }): Promise<StoredSigningResult | null>;
   committedDigest(
     network: string,
     backingTxid: string,
@@ -121,6 +133,7 @@ export class InMemorySigningJournal implements SigningJournalStore {
       digest: string;
       expiresAt: number;
       signed: boolean;
+      signingResult?: StoredSigningResult;
     }
   >();
   constructor(private readonly clock: () => number = () => Date.now()) {}
@@ -155,12 +168,27 @@ export class InMemorySigningJournal implements SigningJournalStore {
     backingTxid: string;
     backingVout: number;
     unsignedTxDigest: string;
+    signingResult?: StoredSigningResult;
   }): Promise<void> {
     const key = `${params.network}:${params.backingTxid}:${params.backingVout}`;
     const held = this.map.get(key);
     if (!held || held.digest !== params.unsignedTxDigest)
       throw new Error("signing reservation lost");
     held.signed = true;
+    held.signingResult ??= params.signingResult;
+  }
+  async readSigned(params: {
+    network: string;
+    backingTxid: string;
+    backingVout: number;
+    unsignedTxDigest: string;
+  }): Promise<StoredSigningResult | null> {
+    const held = this.map.get(
+      `${params.network}:${params.backingTxid}:${params.backingVout}`,
+    );
+    return held?.signed && held.digest === params.unsignedTxDigest
+      ? (held.signingResult ?? null)
+      : null;
   }
   async committedDigest(
     network: string,
