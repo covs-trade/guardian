@@ -1154,10 +1154,11 @@ export const coveV3SigningJournal = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
   (t) => [
-    uniqueIndex("cove_v3_signing_journal_outpoint_uq").on(
+    uniqueIndex("cove_v3_signing_journal_candidate_uq").on(
       t.network,
       t.backingTxid,
       t.backingVout,
+      t.unsignedTxDigest,
     ),
   ],
 );

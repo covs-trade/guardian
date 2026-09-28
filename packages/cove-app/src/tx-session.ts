@@ -1,4 +1,4 @@
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, inArray, isNotNull } from "drizzle-orm";
 import { schema, type Database } from "@crclaunch/db";
 import { AppError } from "./errors.js";
 import type { TokenMetadataInput } from "./metadata.js";
@@ -69,17 +69,19 @@ export async function createTxSession(
   db: Database,
   input: NewTxSession,
 ): Promise<TxSessionRow> {
-  const existing = await db
-    .select()
-    .from(schema.coveV3AppTransactions)
-    .where(
-      and(
-        eq(schema.coveV3AppTransactions.network, input.network),
-        eq(schema.coveV3AppTransactions.walletScript, input.walletScript),
-        eq(schema.coveV3AppTransactions.operation, input.operation),
-        eq(schema.coveV3AppTransactions.idempotencyKey, input.idempotencyKey),
-      ),
-    );
+  const readExisting = () =>
+    db
+      .select()
+      .from(schema.coveV3AppTransactions)
+      .where(
+        and(
+          eq(schema.coveV3AppTransactions.network, input.network),
+          eq(schema.coveV3AppTransactions.walletScript, input.walletScript),
+          eq(schema.coveV3AppTransactions.operation, input.operation),
+          eq(schema.coveV3AppTransactions.idempotencyKey, input.idempotencyKey),
+        ),
+      );
+  let existing = await readExisting();
   if (existing.length > 0) {
     const e = existing[0]!;
     if (
@@ -96,8 +98,29 @@ export async function createTxSession(
   const rows = await db
     .insert(schema.coveV3AppTransactions)
     .values({ ...input, txid: input.txid ?? null })
+    .onConflictDoNothing({
+      target: [
+        schema.coveV3AppTransactions.network,
+        schema.coveV3AppTransactions.walletScript,
+        schema.coveV3AppTransactions.operation,
+        schema.coveV3AppTransactions.idempotencyKey,
+      ],
+    })
     .returning();
-  return rows[0]!;
+  if (rows[0]) return rows[0];
+  existing = await readExisting();
+  const winner = existing[0];
+  if (
+    winner &&
+    winner.tokenId === input.tokenId &&
+    winner.unsignedTxDigest === input.unsignedTxDigest &&
+    sameMetadata(winner.metadataJson, input.metadataJson)
+  )
+    return winner;
+  throw new AppError(
+    "IDEMPOTENCY_CONFLICT",
+    "idempotency key reused with a conflicting payload",
+  );
 }
 export async function updateTxSession(
   db: Database,
@@ -141,18 +164,20 @@ export async function listPendingSessions(
       ),
     );
 }
-export async function findBroadcastSpendOfBacking(
+export async function listSubmittedSpendsOfBacking(
   db: Database,
   network: string,
   tokenId: string,
   backingTxid: string,
   backingVout: number,
-): Promise<{
-  txid: string | null;
-  operation: string;
-} | null> {
-  const rows = await db
-    .select({
+): Promise<
+  {
+    txid: string | null;
+    operation: string;
+  }[]
+> {
+  return db
+    .selectDistinct({
       txid: schema.coveV3AppTransactions.txid,
       operation: schema.coveV3AppTransactions.operation,
     })
@@ -163,9 +188,14 @@ export async function findBroadcastSpendOfBacking(
         eq(schema.coveV3AppTransactions.tokenId, tokenId),
         eq(schema.coveV3AppTransactions.backingTxid, backingTxid),
         eq(schema.coveV3AppTransactions.backingVout, backingVout),
-        eq(schema.coveV3AppTransactions.status, "BROADCAST"),
+        inArray(schema.coveV3AppTransactions.status, [
+          "WALLET_SIGNED",
+          "BROADCAST",
+          "CONFIRMED",
+          "REORGED",
+        ]),
+        isNotNull(schema.coveV3AppTransactions.txid),
       ),
     )
-    .limit(1);
-  return rows[0] ?? null;
+    .limit(65);
 }

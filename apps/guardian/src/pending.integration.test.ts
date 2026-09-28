@@ -156,6 +156,7 @@ async function fixture() {
     value: 10000n,
     confirmations: 1,
   });
+  const chainOutputs = new Map(outputs);
   let tipHash = initialHash,
     observationError = false;
   let changeOnRaw: (() => Promise<void>) | undefined;
@@ -188,7 +189,9 @@ async function fixture() {
           result = tipHash;
           break;
         case "gettxout": {
-          const output = outputs.get(`${txid}:${body.params[1]}`);
+          const output = (
+            body.params[2] === false ? chainOutputs : outputs
+          ).get(`${txid}:${body.params[1]}`);
           result = output
             ? {
                 scriptPubKey: { hex: output.script },
@@ -270,6 +273,7 @@ async function fixture() {
       value: 10000000n,
       confirmations: 1,
     });
+    chainOutputs.set(`${coin}:0`, outputs.get(`${coin}:0`)!);
     const result = buildMintPsbtV3({
       network: bitcoin.networks.regtest,
       tokenId: deploy.tokenId,
@@ -326,6 +330,7 @@ async function fixture() {
     raw,
     mempool,
     outputs,
+    chainOutputs,
     wallet,
     walletScript,
     recoveryKeyXOnly,
@@ -399,20 +404,15 @@ describe.skipIf(!isolated)(
       });
       redeem.psbt.signInput(1, f.wallet);
       redeem.psbt.finalizeInput(1);
-      const carrier = f.outputs.get(`${firstTxid}:2`)!;
       f.outputs.delete(`${firstTxid}:2`);
-      expect((await f.remote.signRedeem(f.request(redeem.psbt))).ok).toBe(
-        false,
-      );
+      expect(await f.remote.signRedeem(f.request(redeem.psbt))).toMatchObject({
+        ok: true,
+      });
       const held = await f.db
         .select()
         .from(schema.coveV3SigningJournal)
         .where(eq(schema.coveV3SigningJournal.backingTxid, secondTxid));
-      expect(held).toEqual([]);
-      f.outputs.set(`${firstTxid}:2`, carrier);
-      expect(await f.remote.signRedeem(f.request(redeem.psbt))).toMatchObject({
-        ok: true,
-      });
+      expect(held).toHaveLength(1);
       await f.db.update(schema.coveV3Cursor).set({ rebuilding: true });
       f.setObservationError(true);
       const retry = bitcoin.Psbt.fromBase64(original);
@@ -420,6 +420,82 @@ describe.skipIf(!isolated)(
         ok: true,
       });
       expect(retry.data.inputs[0]!.finalScriptWitness).toEqual(firstWitness);
+    });
+    it("signs concurrent competing candidates, retains exact retries, and accepts a fresh candidate after abandoned funding", async () => {
+      const f = await fixture(),
+        a = f.mint(),
+        b = f.mint(undefined, undefined, 2000000n * 100000000n);
+      const originalA = a.psbt.toBase64();
+      const signatures = await Promise.all([
+        f.remote.signMint(f.request(a.psbt)),
+        f.remote.signMint(f.request(b.psbt)),
+      ]);
+      expect(signatures.map((r) => r.ok)).toEqual([true, true]);
+      const witnessA = Buffer.from(a.psbt.data.inputs[0]!.finalScriptWitness!);
+      const fundingA = a.psbt.txInputs[1]!;
+      f.chainOutputs.delete(
+        `${Buffer.from(fundingA.hash).reverse().toString("hex")}:${fundingA.index}`,
+      );
+      f.outputs.delete(
+        `${Buffer.from(fundingA.hash).reverse().toString("hex")}:${fundingA.index}`,
+      );
+      const fresh = f.mint();
+      expect((await f.remote.signMint(f.request(fresh.psbt))).ok).toBe(true);
+      f.accept(b.psbt);
+      const afterBroadcast = f.mint();
+      expect((await f.remote.signMint(f.request(afterBroadcast.psbt))).ok).toBe(
+        true,
+      );
+      const retry = bitcoin.Psbt.fromBase64(originalA);
+      expect((await f.remote.signMint(f.request(retry))).ok).toBe(true);
+      expect(retry.data.inputs[0]!.finalScriptWitness).toEqual(witnessA);
+      const all = await f.db.select().from(schema.coveV3SigningJournal);
+      expect(all).toHaveLength(4);
+      expect(new Set(all.map((r) => r.unsignedTxDigest)).size).toBe(4);
+    });
+    it("verifies the winning pending branch against its own digest record and refuses a replaced branch", async () => {
+      const f = await fixture(),
+        a = f.mint(),
+        b = f.mint(undefined, undefined, 2000000n * 100000000n);
+      expect((await f.remote.signMint(f.request(a.psbt))).ok).toBe(true);
+      expect((await f.remote.signMint(f.request(b.psbt))).ok).toBe(true);
+      const aTxid = f.accept(a.psbt),
+        childA = f.mint(a.nextState, {
+          txid: aTxid,
+          script: a.nextVault.scriptPubKey,
+        });
+      expect((await f.remote.signMint(f.request(childA.psbt))).ok).toBe(true);
+      const childATxid = f.accept(childA.psbt);
+      f.mempool.delete(aTxid);
+      f.mempool.delete(childATxid);
+      const bTxid = f.accept(b.psbt),
+        childB = f.mint(b.nextState, {
+          txid: bTxid,
+          script: b.nextVault.scriptPubKey,
+        });
+      expect((await f.remote.signMint(f.request(childB.psbt))).ok).toBe(true);
+      const losingBranch = f.mint(
+        a.nextState,
+        { txid: aTxid, script: a.nextVault.scriptPubKey },
+        2000000n * 100000000n,
+      );
+      expect((await f.remote.signMint(f.request(losingBranch.psbt))).ok).toBe(
+        false,
+      );
+      expect(
+        await f.db.select().from(schema.coveV3SigningJournal),
+      ).toHaveLength(4);
+    });
+    it("rejects a vault spent in the canonical chain even if old signed records remain", async () => {
+      const f = await fixture(),
+        a = f.mint();
+      expect((await f.remote.signMint(f.request(a.psbt))).ok).toBe(true);
+      f.chainOutputs.clear();
+      const b = f.mint();
+      expect((await f.remote.signMint(f.request(b.psbt))).ok).toBe(false);
+      expect(
+        await f.db.select().from(schema.coveV3SigningJournal),
+      ).toHaveLength(1);
     });
     it.each([
       "evicted",

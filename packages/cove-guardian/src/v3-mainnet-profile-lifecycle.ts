@@ -81,7 +81,7 @@ class RegtestRpc {
     try {
       json = JSON.parse(text) as typeof json;
     } catch {
-      json = {};
+      throw new Error("invalid RPC JSON response");
     }
     if (!res.ok || json.error)
       throw new Error(
@@ -415,7 +415,10 @@ async function main(): Promise<void> {
     backingVout: vaultVout,
     unsignedTxDigest: "f".repeat(64),
   });
-  assert(conflict === "CONFLICT", `expected CONFLICT, got ${conflict}`);
+  assert(
+    conflict === "RESERVED",
+    `expected independent candidate reservation, got ${conflict}`,
+  );
   console.log("STEP 3/4 — REDEEM (durable signer, full 10k)");
   const redeem = buildRedeemPsbtV3({
     network: bitcoin.networks.regtest,

@@ -20,6 +20,7 @@ import {
   type GuardianRiskPolicy,
   type DurableAuditSink,
 } from "./transitionSigner.js";
+import { unsignedTxDigest } from "./resolve.js";
 import { InMemorySigningJournal } from "./journal.js";
 import {
   InProcessGuardianTransport,
@@ -416,7 +417,15 @@ describe("remote Guardian client (§24)", () => {
           backingVout: out.backingOutpoint.vout,
           unsignedTxDigest: "ff".repeat(32),
         });
-        expect(conflict).toBe("CONFLICT");
+        expect(conflict).toBe("RESERVED");
+        expect(
+          await journal.readSigned({
+            network: "regtest",
+            backingTxid: out.backingOutpoint.txid,
+            backingVout: out.backingOutpoint.vout,
+            unsignedTxDigest: unsignedTxDigest(psbt),
+          }),
+        ).not.toBeNull();
       }
     },
   );

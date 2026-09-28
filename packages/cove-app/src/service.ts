@@ -1,3 +1,6 @@
+import { isRpcNotFound } from "@crclaunch/bitcoin";
+import { indexedBackingConflict } from "./backing-conflict.js";
+import { buildBackingVaultV3 } from "@crclaunch/cove-vault";
 import * as bitcoin from "bitcoinjs-lib";
 import * as ecc from "tiny-secp256k1";
 import { randomBytes } from "node:crypto";
@@ -107,7 +110,7 @@ import {
   createTxSession,
   requireTxSession,
   updateTxSession,
-  findBroadcastSpendOfBacking,
+  listSubmittedSpendsOfBacking,
 } from "./tx-session.js";
 import {
   upsertTokenMetadata,
@@ -444,6 +447,7 @@ export class V3AppService {
     },
   ): Promise<BackingRow> {
     let tip = confirmed;
+    const visited: string[] = [];
     for (let depth = 0; depth < MAX_PENDING_BACKING_CHAIN; depth++) {
       if (
         stopAt &&
@@ -451,38 +455,178 @@ export class V3AppService {
         tip.input.vout === stopAt.vout
       )
         return tip;
-      const next = await findBroadcastSpendOfBacking(
-        this.db,
-        this.config.network,
-        tokenId,
-        tip.input.txid,
-        tip.input.vout,
-      );
-      if (!next?.txid) return tip;
+      let spendingTxid: string | null | undefined;
+      try {
+        spendingTxid = await this.provider.getMempoolSpender(
+          tip.input.txid,
+          tip.input.vout,
+          { retry: false, signal: AbortSignal.timeout(5000) },
+        );
+      } catch {
+        throw new AppError(
+          "CORE_UNAVAILABLE",
+          "the pending branch cannot currently be observed",
+        );
+      }
+      let next: {
+        txid: string;
+      } | null = spendingTxid ? { txid: spendingTxid } : null;
+      if (spendingTxid === undefined) {
+        const candidates = await listSubmittedSpendsOfBacking(
+          this.db,
+          this.config.network,
+          tokenId,
+          tip.input.txid,
+          tip.input.vout,
+        );
+        if (candidates.length > 64)
+          throw new AppError(
+            "STATE_CHANGED",
+            "too many pending competitors; retry after reconciliation",
+          );
+        for (const candidate of candidates) {
+          if (!candidate.txid) continue;
+          let accepted: boolean;
+          try {
+            accepted = await this.provider.isTransactionInMempool(
+              candidate.txid,
+              { retry: false, signal: AbortSignal.timeout(5000) },
+            );
+          } catch {
+            throw new AppError(
+              "CORE_UNAVAILABLE",
+              "the pending branch cannot currently be observed",
+            );
+          }
+          if (!accepted) continue;
+          if (next)
+            throw new AppError(
+              "STATE_CHANGED",
+              "the accepted branch changed during observation",
+            );
+          next = { txid: candidate.txid };
+        }
+      }
+      if (!next) {
+        if (stopAt)
+          throw new AppError(
+            "STATE_CHANGED",
+            "the requested backing is no longer on the accepted branch; request a fresh quote",
+          );
+        let unspent;
+        try {
+          unspent = await this.provider.getTxout(
+            tip.input.txid,
+            tip.input.vout,
+          );
+        } catch {
+          throw new AppError(
+            "CORE_UNAVAILABLE",
+            "the backing output cannot currently be observed",
+          );
+        }
+        if (
+          !unspent ||
+          unspent.scriptPubKeyHex !== tip.input.script.toString("hex") ||
+          unspent.valueSats !== tip.input.valueSats
+        ) {
+          throw new AppError(
+            "STATE_CHANGED",
+            "the backing output has changed; request a fresh quote",
+          );
+        }
+        for (const txid of visited) {
+          let present: boolean;
+          try {
+            present = await this.provider.isTransactionInMempool(txid, {
+              retry: false,
+              signal: AbortSignal.timeout(5000),
+            });
+          } catch {
+            throw new AppError(
+              "CORE_UNAVAILABLE",
+              "the pending branch cannot currently be verified",
+            );
+          }
+          if (!present)
+            throw new AppError(
+              "STATE_CHANGED",
+              "the pending branch changed during observation",
+            );
+        }
+        return tip;
+      }
+      visited.push(next.txid);
       let raw: string;
       try {
         raw = await this.provider.getRawTransaction(next.txid);
-      } catch {
-        return tip;
+      } catch (error) {
+        throw new AppError(
+          isRpcNotFound(error, "getrawtransaction")
+            ? "STATE_CHANGED"
+            : "CORE_UNAVAILABLE",
+          "the pending backing transaction cannot currently be verified",
+        );
       }
       const tx = bitcoin.Transaction.fromHex(raw);
+      if (
+        tx.getId() !== next.txid ||
+        !tx.ins[0] ||
+        Buffer.from(tx.ins[0].hash).reverse().toString("hex") !==
+          tip.input.txid ||
+        tx.ins[0].index !== tip.input.vout
+      ) {
+        throw new AppError(
+          "STATE_CHANGED",
+          "the pending transaction does not spend the expected backing",
+        );
+      }
       let envelope: ParsedEnvelopeV2;
       try {
         envelope = decodeCoveOpReturnTx(tx);
       } catch {
-        return tip;
+        throw new AppError(
+          "STATE_CHANGED",
+          "the pending backing transaction is invalid",
+        );
       }
+      if (
+        !("tokenId" in envelope) ||
+        !envelope.tokenId.equals(Buffer.from(tokenId, "hex"))
+      )
+        throw new AppError(
+          "STATE_CHANGED",
+          "the pending transaction belongs to another token",
+        );
       let nextState: CoveStateV2;
       if (envelope.op === OP_MINT) {
         nextState = applyMintV2(tip.state, envelope.amount).nextState;
       } else if (envelope.op === OP_REDEEM) {
         nextState = applyRedeemV2(tip.state, envelope.redeemAmount).nextState;
       } else {
-        return tip;
+        throw new AppError(
+          "STATE_CHANGED",
+          "the pending transaction does not move the backing vault",
+        );
       }
       const vaultOut = tx.outs[BACKING_SUCCESSOR_VOUT];
       const expectedValue = RESERVE_ANCHOR_SATS + nextState.backingSats;
-      if (!vaultOut || BigInt(vaultOut.value) !== expectedValue) return tip;
+      const nextVault = buildBackingVaultV3({
+        state: nextState,
+        guardianXOnly: this.config.guardianXOnly,
+        recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+        recoveryProfile: this.config.recoveryProfile,
+        network: btcNetwork(this.config.network),
+      });
+      if (
+        !vaultOut ||
+        !vaultOut.script.equals(nextVault.scriptPubKey) ||
+        BigInt(vaultOut.value) !== expectedValue
+      )
+        throw new AppError(
+          "STATE_CHANGED",
+          "the pending backing output cannot be verified",
+        );
       tip = {
         state: nextState,
         stateHash: stateHashV2(nextState),
@@ -494,7 +638,10 @@ export class V3AppService {
         },
       };
     }
-    return tip;
+    throw new AppError(
+      "STATE_CHANGED",
+      "the pending backing chain exceeds the verification limit",
+    );
   }
   private overlayPendingBacking(
     view: CoveCanonicalView,
@@ -1812,14 +1959,6 @@ export class V3AppService {
         ),
       );
     const session = rows[0] ?? null;
-    let mempool = false;
-    try {
-      await this.provider.getRawTransaction(txid);
-      mempool = true;
-    } catch {
-      mempool = false;
-    }
-    let confirmedHeight: bigint | null = null;
     const evRows = await this.db
       .select()
       .from(schema.coveV3Events)
@@ -1830,8 +1969,81 @@ export class V3AppService {
           eq(schema.coveV3Events.canonical, true),
         ),
       );
-    if (evRows.length > 0) confirmedHeight = evRows[0]!.blockHeight;
-    return { txid, session, mempool, confirmedHeight };
+    const confirmedHeight = evRows[0]?.blockHeight ?? null;
+    const publicSession = session
+      ? {
+          status:
+            session.status === "CONFIRMED" && confirmedHeight === null
+              ? "REORGED"
+              : session.status,
+        }
+      : null;
+    if (confirmedHeight !== null)
+      return {
+        txid,
+        session: publicSession,
+        state: "confirmed" as const,
+        mempool: false,
+        confirmedHeight,
+        confirmedBlockHash: evRows[0]?.blockHash ?? null,
+        observedAt: evRows[0]?.createdAt?.toISOString() ?? null,
+        stale: false,
+      };
+    const unknown = {
+      txid,
+      session: publicSession,
+      state: "unknown" as const,
+      mempool: null,
+      confirmedHeight: null,
+      confirmedBlockHash: null,
+      observedAt: null,
+      stale: true,
+    };
+    if (
+      session?.backingVout === 1 &&
+      (await indexedBackingConflict(this.db, this.config.network, txid))
+    ) {
+      return {
+        ...unknown,
+        session: { status: "CONFLICTED" },
+        state: "conflicted" as const,
+        mempool: false,
+        observedAt: new Date().toISOString(),
+        stale: false,
+      };
+    }
+    if (!session) {
+      const fills = await this.db
+        .select({ id: schema.coveV3MarketFills.id })
+        .from(schema.coveV3MarketFills)
+        .where(
+          and(
+            eq(schema.coveV3MarketFills.network, this.config.network),
+            eq(schema.coveV3MarketFills.txid, txid),
+          ),
+        )
+        .limit(1);
+      if (fills.length === 0) return unknown;
+    }
+    try {
+      const observation = await this.provider.observeTransaction(txid, {
+        signal: AbortSignal.timeout(5000),
+        retry: false,
+      });
+      if (observation.state === "unknown") return unknown;
+      return {
+        ...unknown,
+        state:
+          observation.state === "mempool"
+            ? ("pending" as const)
+            : ("mined" as const),
+        mempool: observation.state === "mempool",
+        observedAt: new Date().toISOString(),
+        stale: false,
+      };
+    } catch {
+      return unknown;
+    }
   }
   async reconcileAppSessions(): Promise<{
     confirmed: number;
@@ -1861,15 +2073,6 @@ export class V3AppService {
       if (ev.length > 0) {
         await updateTxSession(this.db, s.id, { status: "CONFIRMED" });
         confirmed++;
-      } else {
-        try {
-          await this.provider.getRawTransaction(s.txid);
-        } catch {
-          await updateTxSession(this.db, s.id, {
-            status: "FAILED",
-            errorCode: "MEMPOOL_EVICTED",
-          });
-        }
       }
     }
     return { confirmed };
@@ -2125,5 +2328,27 @@ export class V3AppService {
     if (txid !== validated.txid)
       throw new AppError("BROADCAST_FAILED", "broadcast txid mismatch");
     return txid;
+  }
+  async publicFillStatus(fillId: string) {
+    const rows = await this.db
+      .select({
+        id: schema.coveV3MarketFills.id,
+        tokenId: schema.coveV3MarketFills.tokenId,
+        status: schema.coveV3MarketFills.status,
+        txid: schema.coveV3MarketFills.txid,
+        blockHeight: schema.coveV3MarketFills.blockHeight,
+        blockHash: schema.coveV3MarketFills.blockHash,
+        canonical: schema.coveV3MarketFills.canonical,
+        updatedAt: schema.coveV3MarketFills.updatedAt,
+      })
+      .from(schema.coveV3MarketFills)
+      .where(
+        and(
+          eq(schema.coveV3MarketFills.network, this.config.network),
+          eq(schema.coveV3MarketFills.id, fillId),
+        ),
+      )
+      .limit(1);
+    return rows[0] ?? null;
   }
 }

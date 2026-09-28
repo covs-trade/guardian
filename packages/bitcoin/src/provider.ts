@@ -292,10 +292,51 @@ export class CoreRpcProvider implements BitcoinChainProvider {
     this.rawTransactionPending.set(txid, read);
     return read;
   }
-  async observeTransaction(
+  async getMempoolSpender(
+    txid: string,
+    vout: number,
+    options: RpcReadOptions = {},
+  ): Promise<string | null | undefined> {
+    let rows: {
+      txid?: string;
+      vout?: number;
+      spendingtxid?: string;
+    }[];
+    try {
+      rows = await this.call(
+        "gettxspendingprevout",
+        [[{ txid, vout }]],
+        options,
+      );
+    } catch (error) {
+      if (
+        error instanceof RpcError &&
+        error.kind === "rpc" &&
+        error.rpcCode === -32601
+      )
+        return undefined;
+      throw error;
+    }
+    if (
+      !Array.isArray(rows) ||
+      rows.length !== 1 ||
+      rows[0]?.txid !== txid ||
+      rows[0]?.vout !== vout ||
+      (rows[0]?.spendingtxid !== undefined &&
+        !/^[0-9a-f]{64}$/i.test(rows[0].spendingtxid))
+    ) {
+      throw new RpcError(
+        "gettxspendingprevout",
+        "response",
+        "invalid mempool spender response",
+      );
+    }
+    return rows[0]!.spendingtxid?.toLowerCase() ?? null;
+  }
+  async isTransactionInMempool(
     txid: string,
     options: RpcReadOptions = {},
-  ): Promise<TransactionObservation> {
+  ): Promise<boolean> {
     try {
       const entry = await this.call<{
         vsize?: number;
@@ -306,10 +347,18 @@ export class CoreRpcProvider implements BitcoinChainProvider {
           "response",
           "invalid mempool entry",
         );
-      return { state: "mempool", blockHash: null };
+      return true;
     } catch (error) {
       if (!isRpcNotFound(error, "getmempoolentry")) throw error;
+      return false;
     }
+  }
+  async observeTransaction(
+    txid: string,
+    options: RpcReadOptions = {},
+  ): Promise<TransactionObservation> {
+    if (await this.isTransactionInMempool(txid, options))
+      return { state: "mempool", blockHash: null };
     try {
       const tx = await this.call<{
         txid: string;
@@ -362,6 +411,7 @@ export class CoreRpcProvider implements BitcoinChainProvider {
   async getTxout(
     txid: string,
     vout: number,
+    includeMempool?: boolean,
   ): Promise<{
     scriptPubKeyHex: string;
     valueSats: bigint;
@@ -375,7 +425,12 @@ export class CoreRpcProvider implements BitcoinChainProvider {
       value?: number;
       confirmations?: number;
       bestblock?: string;
-    } | null>("gettxout", [txid, vout]);
+    } | null>(
+      "gettxout",
+      includeMempool === undefined
+        ? [txid, vout]
+        : [txid, vout, includeMempool],
+    );
     if (res === null) return null;
     if (
       !res ||

@@ -31,6 +31,7 @@ export interface TxOutReader {
   getTxout(
     txid: string,
     vout: number,
+    includeMempool?: boolean,
   ): Promise<{
     confirmations: number;
     scriptPubKeyHex?: string;
@@ -111,7 +112,7 @@ export function chainFundingChecker(params: {
           | undefined;
         try {
           if (indexedHeight !== undefined) core = await getObservation();
-          txout = await params.chain.getTxout(o.txid, o.vout);
+          txout = await params.chain.getTxout(o.txid, o.vout, false);
         } catch (e) {
           return refuse(
             "FUNDING_CHECK_UNAVAILABLE",

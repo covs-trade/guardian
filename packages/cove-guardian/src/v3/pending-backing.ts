@@ -54,6 +54,27 @@ export async function verifyPendingBackingView(
         ? "test"
         : params.network;
   if (tip.chain !== expectedChain) throw new Error("PENDING_WRONG_NETWORK");
+  const baseVault = buildBackingVaultV3({
+    state,
+    guardianXOnly: params.guardianXOnly,
+    recoveryKeyXOnly: params.recoveryKeyXOnly,
+    recoveryProfile: params.recoveryProfile,
+    network:
+      params.network === "mainnet"
+        ? bitcoin.networks.bitcoin
+        : params.network === "regtest"
+          ? bitcoin.networks.regtest
+          : bitcoin.networks.testnet,
+  });
+  const base = await params.provider.getTxout(anchor.txid, anchor.vout, false);
+  if (
+    !base ||
+    base.bestBlockHash !== tip.bestBlockHash ||
+    base.scriptPubKeyHex !== baseVault.scriptPubKey.toString("hex") ||
+    base.valueSats !== RESERVE_ANCHOR_SATS + state.backingSats
+  ) {
+    throw new Error("PENDING_CANONICAL_VAULT_UNAVAILABLE");
+  }
   const ancestors: bitcoin.Transaction[] = [];
   const seen = new Set<string>();
   let cursor = params.target;
@@ -227,10 +248,20 @@ export async function verifyPendingBackingView(
           ? bitcoin.networks.regtest
           : bitcoin.networks.testnet,
   });
-  const output = await params.provider.getTxout(
-    params.target.txid,
-    params.target.vout,
-  );
+  const observedOutput =
+    key(params.target) === key(anchor)
+      ? base
+      : await params.provider.getTxout(params.target.txid, params.target.vout);
+  const output =
+    observedOutput ??
+    (ancestors.length
+      ? {
+          bestBlockHash: tip.bestBlockHash,
+          scriptPubKeyHex:
+            ancestors[ancestors.length - 1]!.outs[1]!.script.toString("hex"),
+          valueSats: BigInt(ancestors[ancestors.length - 1]!.outs[1]!.value),
+        }
+      : null);
   if (
     !output ||
     output.bestBlockHash !== tip.bestBlockHash ||
@@ -243,7 +274,21 @@ export async function verifyPendingBackingView(
   for (const input of params.requestedInputs ?? []) {
     const token = finalView.getTokenUtxo(input);
     if (!token) continue;
-    const carrier = await params.provider.getTxout(input.txid, input.vout);
+    const pendingToken = tokens.get(key(input));
+    const observedCarrier = await params.provider.getTxout(
+      input.txid,
+      input.vout,
+      pendingToken ? undefined : false,
+    );
+    const carrier =
+      observedCarrier ??
+      (pendingToken
+        ? {
+            bestBlockHash: tip.bestBlockHash,
+            scriptPubKeyHex: pendingToken.scriptPubKey.toString("hex"),
+            valueSats: TOKEN_CARRIER_SATS,
+          }
+        : null);
     if (
       !carrier ||
       carrier.bestBlockHash !== tip.bestBlockHash ||

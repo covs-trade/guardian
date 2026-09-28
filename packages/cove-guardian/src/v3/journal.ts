@@ -87,7 +87,7 @@ export function verifyGuardianAuditChain(
   }
   return true;
 }
-export type SigningReservation = "RESERVED" | "IDEMPOTENT" | "CONFLICT";
+export type SigningReservation = "RESERVED" | "IDEMPOTENT";
 export interface StoredSigningResult {
   psbtBase64: string;
   resultJson: string;
@@ -118,6 +118,7 @@ export interface SigningJournalStore {
     network: string,
     backingTxid: string,
     backingVout: number,
+    unsignedTxDigest: string,
   ): Promise<string | null>;
   release(params: {
     network: string;
@@ -146,15 +147,13 @@ export class InMemorySigningJournal implements SigningJournalStore {
     backingVout: number;
     unsignedTxDigest: string;
   }): Promise<SigningReservation> {
-    const key = `${params.network}:${params.backingTxid}:${params.backingVout}`;
+    const key = `${params.network}:${params.backingTxid}:${params.backingVout}:${params.unsignedTxDigest}`;
     const existing = this.map.get(key);
     if (
       existing !== undefined &&
       (existing.signed || existing.expiresAt > this.now())
     ) {
-      return existing.digest === params.unsignedTxDigest
-        ? "IDEMPOTENT"
-        : "CONFLICT";
+      return "IDEMPOTENT";
     }
     this.map.set(key, {
       digest: params.unsignedTxDigest,
@@ -170,7 +169,7 @@ export class InMemorySigningJournal implements SigningJournalStore {
     unsignedTxDigest: string;
     signingResult?: StoredSigningResult;
   }): Promise<void> {
-    const key = `${params.network}:${params.backingTxid}:${params.backingVout}`;
+    const key = `${params.network}:${params.backingTxid}:${params.backingVout}:${params.unsignedTxDigest}`;
     const held = this.map.get(key);
     if (!held || held.digest !== params.unsignedTxDigest)
       throw new Error("signing reservation lost");
@@ -184,7 +183,7 @@ export class InMemorySigningJournal implements SigningJournalStore {
     unsignedTxDigest: string;
   }): Promise<StoredSigningResult | null> {
     const held = this.map.get(
-      `${params.network}:${params.backingTxid}:${params.backingVout}`,
+      `${params.network}:${params.backingTxid}:${params.backingVout}:${params.unsignedTxDigest}`,
     );
     return held?.signed && held.digest === params.unsignedTxDigest
       ? (held.signingResult ?? null)
@@ -194,8 +193,9 @@ export class InMemorySigningJournal implements SigningJournalStore {
     network: string,
     backingTxid: string,
     backingVout: number,
+    unsignedTxDigest: string,
   ): Promise<string | null> {
-    const key = `${network}:${backingTxid}:${backingVout}`;
+    const key = `${network}:${backingTxid}:${backingVout}:${unsignedTxDigest}`;
     const existing = this.map.get(key);
     if (
       existing !== undefined &&
@@ -213,7 +213,7 @@ export class InMemorySigningJournal implements SigningJournalStore {
     backingVout: number;
     unsignedTxDigest: string;
   }): Promise<void> {
-    const key = `${params.network}:${params.backingTxid}:${params.backingVout}`;
+    const key = `${params.network}:${params.backingTxid}:${params.backingVout}:${params.unsignedTxDigest}`;
     const existing = this.map.get(key);
     if (existing?.digest === params.unsignedTxDigest && !existing.signed)
       this.map.delete(key);

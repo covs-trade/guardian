@@ -18,11 +18,13 @@ export class PostgresSigningJournal implements SigningJournalStore {
     network: string;
     backingTxid: string;
     backingVout: number;
+    unsignedTxDigest: string;
   }) {
     return and(
       eq(schema.coveV3SigningJournal.network, params.network),
       eq(schema.coveV3SigningJournal.backingTxid, params.backingTxid),
       eq(schema.coveV3SigningJournal.backingVout, params.backingVout),
+      eq(schema.coveV3SigningJournal.unsignedTxDigest, params.unsignedTxDigest),
     );
   }
   async reserve(params: {
@@ -47,6 +49,7 @@ export class PostgresSigningJournal implements SigningJournalStore {
           schema.coveV3SigningJournal.network,
           schema.coveV3SigningJournal.backingTxid,
           schema.coveV3SigningJournal.backingVout,
+          schema.coveV3SigningJournal.unsignedTxDigest,
         ],
         set: { unsignedTxDigest: params.unsignedTxDigest, expiresAt },
         setWhere: and(
@@ -56,15 +59,13 @@ export class PostgresSigningJournal implements SigningJournalStore {
       })
       .returning({ digest: schema.coveV3SigningJournal.unsignedTxDigest });
     if (claimed.length > 0) return "RESERVED";
-    const held = await this.db
+    const [row] = await this.db
       .select()
       .from(schema.coveV3SigningJournal)
       .where(this.rowKey(params));
-    const row = held[0];
-    if (!row) return "CONFLICT";
-    return row.unsignedTxDigest === params.unsignedTxDigest
-      ? "IDEMPOTENT"
-      : "CONFLICT";
+    if (!row)
+      throw new Error("signing reservation disappeared; retry validation");
+    return "IDEMPOTENT";
   }
   async markSigned(params: {
     network: string;
@@ -127,11 +128,14 @@ export class PostgresSigningJournal implements SigningJournalStore {
     network: string,
     backingTxid: string,
     backingVout: number,
+    unsignedTxDigest: string,
   ): Promise<string | null> {
     const rows = await this.db
       .select()
       .from(schema.coveV3SigningJournal)
-      .where(this.rowKey({ network, backingTxid, backingVout }));
+      .where(
+        this.rowKey({ network, backingTxid, backingVout, unsignedTxDigest }),
+      );
     const row = rows[0];
     if (!row) return null;
     if (!row.signedAt && row.expiresAt.getTime() <= Date.now()) return null;

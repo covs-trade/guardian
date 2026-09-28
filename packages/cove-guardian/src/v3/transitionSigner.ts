@@ -235,14 +235,6 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
       backingVout: record.backingOutpoint.vout,
       unsignedTxDigest: record.unsignedTxDigest,
     });
-    if (reservation === "CONFLICT") {
-      return {
-        ok: false,
-        reason: "BACKING_ALREADY_SIGNED",
-        detail: "backing outpoint already signed with a different digest",
-        audit: record,
-      };
-    }
     const prevVault = buildBackingVaultV3({
       state: analysis.currentState,
       guardianXOnly,
