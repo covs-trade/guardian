@@ -182,17 +182,8 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
     op: "MINT" | "REDEEM",
   ): Promise<TransitionSignOutcome> {
     const guardianXOnly = await this.signer.xOnlyPubkey();
-    const input = req.psbt.txInputs[0];
-    if (input && this.journal.readSigned) {
-      const cached = await this.journal.readSigned({
-        network: req.network,
-        backingTxid: Buffer.from(input.hash).reverse().toString("hex"),
-        backingVout: input.index,
-        unsignedTxDigest: unsignedTxDigest(req.psbt),
-      });
-      if (cached)
-        return this.restoreSigningResult(req, op, guardianXOnly, cached);
-    }
+    const cached = await this.recoverSigned(req, op);
+    if (cached) return cached;
     const validate = await (op === "MINT"
       ? validateMintTransitionV3({ ...req, guardianXOnly })
       : validateRedeemTransitionV3({ ...req, guardianXOnly }));
@@ -331,6 +322,27 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
       auditFinalizationError,
     };
   }
+  async recoverSigned(
+    req: Pick<TransitionSignRequest, "psbt" | "network">,
+    op: "MINT" | "REDEEM",
+  ): Promise<TransitionSignOutcome | null> {
+    const input = req.psbt.txInputs[0];
+    if (!input || !this.journal.readSigned) return null;
+    const cached = await this.journal.readSigned({
+      network: req.network,
+      backingTxid: Buffer.from(input.hash).reverse().toString("hex"),
+      backingVout: input.index,
+      unsignedTxDigest: unsignedTxDigest(req.psbt),
+    });
+    return cached
+      ? this.restoreSigningResult(
+          req,
+          op,
+          await this.signer.xOnlyPubkey(),
+          cached,
+        )
+      : null;
+  }
   private signedOutcome(record: AuditRecord): SignedTransitionResult {
     return {
       ok: true,
@@ -349,7 +361,7 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
     };
   }
   private async restoreSigningResult(
-    req: TransitionSignRequest,
+    req: Pick<TransitionSignRequest, "psbt" | "network">,
     op: "MINT" | "REDEEM",
     guardianXOnly: Buffer,
     cached: {

@@ -2,6 +2,8 @@ import type * as bitcoin from "bitcoinjs-lib";
 import type { CoveCanonicalView } from "@crclaunch/cove-covenant";
 import type { VaultRecoveryProfile } from "@crclaunch/cove-vault";
 import type { SignedTransitionResult, GuardianV3Network } from "./types.js";
+import { decodeCoveOpReturn } from "./resolve.js";
+import { OP_MINT, OP_REDEEM } from "@crclaunch/cove-wire";
 import type { FundingInputChecker } from "./funding.js";
 export interface GuardianSignRequestWire {
   requestId: string;
@@ -60,6 +62,10 @@ export type GuardianSignServiceOutcome =
       detail: string;
     };
 export interface GuardianSigningService {
+  recoverSigned?(
+    req: Pick<GuardianSignServiceRequest, "psbt" | "network">,
+    operation: "MINT" | "REDEEM",
+  ): Promise<GuardianSignServiceOutcome | null>;
   signMint(
     req: GuardianSignServiceRequest,
   ): Promise<GuardianSignServiceOutcome>;
@@ -112,7 +118,7 @@ export interface InProcessGuardianTransportOptions {
   decode: (psbtBase64: string) => {
     psbt: bitcoin.Psbt;
   };
-  loadView: (tokenId: string) => Promise<CoveCanonicalView>;
+  loadView: (tokenId: string, psbt: bitcoin.Psbt) => Promise<CoveCanonicalView>;
   recoveryKeyXOnly: Buffer;
   recoveryProfile?: VaultRecoveryProfile;
   feeScript: Buffer;
@@ -158,7 +164,24 @@ export class InProcessGuardianTransport implements GuardianTransport {
   }
   async sign(req: GuardianSignRequestWire): Promise<GuardianSignResponseWire> {
     const { psbt } = this.opts.decode(req.psbtBase64);
-    const view = await this.opts.loadView(req.tokenId);
+    const envelope = decodeCoveOpReturn(psbt);
+    if (
+      (req.operation !== "MINT" && req.operation !== "REDEEM") ||
+      envelope.op !== (req.operation === "MINT" ? OP_MINT : OP_REDEEM) ||
+      !("tokenId" in envelope) ||
+      envelope.tokenId.toString("hex") !== req.tokenId
+    ) {
+      return {
+        ok: false,
+        reason: "REQUEST_COMMITMENT_MISMATCH",
+        detail: "operation or token does not match the transaction",
+      };
+    }
+    const recovered = await this.opts.signer.recoverSigned?.(
+      { psbt, network: this.opts.network },
+      req.operation,
+    );
+    const view = recovered ? null : await this.opts.loadView(req.tokenId, psbt);
     const base = {
       network: this.opts.network,
       recoveryKeyXOnly: this.opts.recoveryKeyXOnly,
@@ -170,9 +193,10 @@ export class InProcessGuardianTransport implements GuardianTransport {
       fundingChecker: this.opts.fundingChecker,
     };
     const outcome =
-      req.operation === "MINT"
-        ? await this.opts.signer.signMint({ psbt, view, ...base })
-        : await this.opts.signer.signRedeem({ psbt, view, ...base });
+      recovered ??
+      (req.operation === "MINT"
+        ? await this.opts.signer.signMint({ psbt, view: view!, ...base })
+        : await this.opts.signer.signRedeem({ psbt, view: view!, ...base }));
     if (!outcome.ok)
       return { ok: false, reason: outcome.reason, detail: outcome.detail };
     const w = psbt.data.inputs[0]!.finalScriptWitness!;

@@ -5,13 +5,18 @@ import type {
   ResolvedMainnetProfile,
 } from "@crclaunch/cove-mainnet";
 import type { VaultRecoveryProfile } from "@crclaunch/cove-vault";
-import { CoreRpcProvider } from "@crclaunch/bitcoin";
+import {
+  CoreRpcProvider,
+  checkSpendSignature,
+  unfinalizeKeyInputs,
+} from "@crclaunch/bitcoin";
 import {
   LocalGuardianTransitionSigner,
   custodySigningBackend,
   InProcessGuardianTransport,
   chainFundingChecker,
   ordAssetLookup,
+  verifyPendingBackingView,
   type GuardianCustodyBackend,
   type GuardianSigningBackend,
   type GuardianRiskPolicy,
@@ -121,7 +126,12 @@ export function buildGuardianService(
   const core = new CoreRpcProvider(config.coreRpc);
   const fundingChecker = chainFundingChecker({
     chain: core,
-    expectedChain: config.network === "mainnet" ? "main" : config.network === "testnet" ? "test" : config.network,
+    expectedChain:
+      config.network === "mainnet"
+        ? "main"
+        : config.network === "testnet"
+          ? "test"
+          : config.network,
     isCoveCarrier: async (o) =>
       (await getLiveTokenUtxosAtDb(db, config.network, [o])).length > 0,
     assets: config.ordUrl ? ordAssetLookup(config.ordUrl) : undefined,
@@ -175,7 +185,13 @@ export function buildGuardianService(
     guardianXOnly,
     network: config.network,
     decode: (psbtBase64) => ({ psbt: bitcoin.Psbt.fromBase64(psbtBase64) }),
-    loadView: async (tokenId) => {
+    loadView: async (tokenId, psbt) => {
+      const authorization = psbt.clone();
+      unfinalizeKeyInputs(authorization);
+      for (let index = 1; index < authorization.data.inputs.length; index++) {
+        if (!checkSpendSignature(authorization, index).ok)
+          throw new Error("Guardian wallet signature is invalid");
+      }
       const view = await loadCanonicalViewSnapshotFromDb({
         db,
         network: config.network,
@@ -193,7 +209,52 @@ export function buildGuardianService(
       ) {
         throw new Error("Guardian indexer cursor diverged from Core");
       }
-      return view;
+      const input = psbt.txInputs[0];
+      if (!input) throw new Error("Guardian request has no vault input");
+      return verifyPendingBackingView({
+        view,
+        target: {
+          txid: Buffer.from(input.hash).reverse().toString("hex"),
+          vout: input.index,
+        },
+        tokenId: Buffer.from(tokenId, "hex"),
+        requestedInputs: psbt.txInputs
+          .slice(1)
+          .map((input) => ({
+            txid: Buffer.from(input.hash).reverse().toString("hex"),
+            vout: input.index,
+          })),
+        provider: core,
+        journal,
+        network: config.network,
+        guardianXOnly: Buffer.from(guardianXOnly, "hex"),
+        recoveryKeyXOnly,
+        recoveryProfile,
+        feeScript,
+        buyFeeBps: BigInt(profile.buyFeeBps!),
+        redeemFeeBps: BigInt(profile.redeemFeeBps!),
+        maxMinerFeeSats: MAX_MINER_FEE_SATS,
+        assertCurrent: async () => {
+          const latest = await loadCanonicalViewSnapshotFromDb({
+            db,
+            network: config.network,
+            tokenId,
+          });
+          const before = view.getBackingOutpoint(Buffer.from(tokenId, "hex"));
+          const after = latest.getBackingOutpoint(Buffer.from(tokenId, "hex"));
+          if (
+            latest.rebuilding ||
+            latest.cursorHeight !== view.cursorHeight ||
+            latest.cursorBlockHash !== view.cursorBlockHash ||
+            latest.stateRoot !== view.stateRoot ||
+            after?.txid !== before?.txid ||
+            after?.vout !== before?.vout
+          )
+            throw new Error(
+              "Guardian indexer view changed during pending validation",
+            );
+        },
+      });
     },
     recoveryKeyXOnly,
     recoveryProfile,

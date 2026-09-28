@@ -55,21 +55,9 @@ export function decodeCoveOpReturnTx(
   return decodeV2(Buffer.from(script.subarray(2)));
 }
 export function unsignedTransaction(psbt: bitcoin.Psbt): bitcoin.Transaction {
-  const tx = new bitcoin.Transaction();
-  tx.version = 2;
-  for (const i of psbt.txInputs) {
-    tx.ins.push({
-      hash: Buffer.from(i.hash),
-      index: i.index,
-      script: Buffer.alloc(0),
-      sequence: i.sequence ?? 0xffffffff,
-      witness: [],
-    });
-  }
-  for (const o of psbt.txOutputs) {
-    tx.outs.push({ script: Buffer.from(o.script), value: o.value });
-  }
-  return tx;
+  return bitcoin.Transaction.fromBuffer(
+    psbt.data.globalMap.unsignedTx.toBuffer(),
+  );
 }
 export function unsignedTxDigest(psbt: bitcoin.Psbt): string {
   return unsignedTransaction(psbt).getId();

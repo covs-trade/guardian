@@ -120,3 +120,8 @@ export {
   type InProcessGuardianTransportOptions,
 } from "./guardianApi.js";
 export { decodeCoveOpReturn, decodeCoveOpReturnTx } from "./resolve.js";
+export {
+  verifyPendingBackingView,
+  MAX_PENDING_ANCESTORS,
+  type PendingBackingParams,
+} from "./pending-backing.js";

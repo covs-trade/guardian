@@ -75,9 +75,15 @@ importers:
         specifier: ^8.2.0
         version: 8.2.0
     devDependencies:
+      '@crclaunch/cove-covenant':
+        specifier: workspace:*
+        version: link:../../packages/cove-covenant
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.4
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@types/pg@8.23.1)(pg@8.23.0)
       tiny-secp256k1:
         specifier: ^2.2.3
         version: 2.2.4
