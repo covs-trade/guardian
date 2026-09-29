@@ -1,5 +1,5 @@
 import * as bitcoin from "bitcoinjs-lib";
-import { createDb } from "@crclaunch/db";
+import { createDb, PostgresRpcBudget, providerAccount } from "@crclaunch/db";
 import type {
   MainnetProfile,
   ResolvedMainnetProfile,
@@ -42,7 +42,10 @@ export interface GuardianServiceConfig {
     url: string;
     user?: string;
     password?: string;
+    apiKey?: string;
   };
+  rpcRequestsPerSecond?: number;
+  rpcBudgetDatabaseUrl?: string;
   ordUrl?: string;
 }
 const MAX_MINER_FEE_SATS = 20000n;
@@ -123,7 +126,18 @@ export function buildGuardianService(
   const feeScript = Buffer.from(profile.feeScript, "hex");
   const riskPolicy = riskPolicyFromProfile(profile);
   const db: Database = createDb(config.databaseUrl);
-  const core = new CoreRpcProvider(config.coreRpc);
+  const budgetDb = config.rpcBudgetDatabaseUrl
+    ? createDb(config.rpcBudgetDatabaseUrl)
+    : db;
+  const core = new CoreRpcProvider({
+    ...config.coreRpc,
+    budget: new PostgresRpcBudget(
+      budgetDb,
+      providerAccount(config.coreRpc),
+      "guardian",
+      config.rpcRequestsPerSecond ?? (config.network === "regtest" ? 90 : 3),
+    ),
+  });
   const fundingChecker = chainFundingChecker({
     chain: core,
     expectedChain:

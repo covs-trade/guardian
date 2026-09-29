@@ -20,6 +20,8 @@ async function main(): Promise<void> {
     signingArmed: boot.canaryActive,
     custodyBackend: boot.custodyBackend,
     coreRpc: boot.coreRpc,
+    rpcRequestsPerSecond: boot.rpcRequestsPerSecond,
+    rpcBudgetDatabaseUrl: boot.rpcBudgetDatabaseUrl,
     ordUrl: boot.ordUrl,
   });
   const chain = (await built.core.getBlockchainInfo()).chain;

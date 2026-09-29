@@ -22,3 +22,5 @@ export {
   InvalidTransitionError,
 } from "./state-machine.js";
 export * from "./repo.js";
+export * from "./deployment-metadata.js";
+export * from "./quotas.js";

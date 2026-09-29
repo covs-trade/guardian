@@ -95,3 +95,5 @@ export {
   type SpendableInput,
   type SignatureProblem,
 } from "./spend.js";
+export { AddressUtxoCache, AddressLookupBusy } from "./address-cache.js";
+export { withRpcDeadline, type RpcConfig } from "./provider.js";

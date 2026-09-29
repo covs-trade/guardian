@@ -65,12 +65,14 @@ export function buildAppTransitionSigner(
     ? new HttpGuardianTransport(
         config.guardianEndpoint,
         config.guardianAuthToken ?? "",
+        180000,
       )
     : failClosedTransport();
   return new RemoteGuardianTransitionSigner(
     transport,
     config.mainnetProfileHash ?? "",
     config.guardianXOnly.toString("hex"),
+    180000,
   );
 }
 export function watchGuardianAgreement(

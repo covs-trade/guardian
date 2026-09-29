@@ -1,3 +1,4 @@
+import { withRpcDeadline } from "@crclaunch/bitcoin";
 import { createServer, type ServerResponse } from "node:http";
 import type { GuardianTransport } from "@crclaunch/cove-guardian/v3";
 import {
@@ -16,7 +17,8 @@ export function createGuardianHttpServer(config: {
   if (!config.authToken)
     throw new Error("Guardian HTTP authentication is required");
   const limiter = new FixedWindowRateLimiter();
-  return createServer(async (req, res) => {
+  let signing = 0;
+  const server = createServer(async (req, res) => {
     try {
       const url = (req.url ?? "/").split("?")[0]!;
       if (
@@ -31,8 +33,21 @@ export function createGuardianHttpServer(config: {
       if (req.method === "GET" && url === "/health")
         return json(res, 200, await config.transport.health());
       if (req.method === "POST" && url === "/sign") {
-        const body = await readJsonWithLimit(req, 1000000);
-        return json(res, 200, await config.transport.sign(body as never));
+        if (signing >= 2) {
+          res.setHeader("retry-after", "2");
+          return json(res, 503, { error: "signing capacity unavailable" });
+        }
+        signing++;
+        try {
+          const body = await readJsonWithLimit(req, 1000000);
+          const result = await withRpcDeadline(
+            AbortSignal.timeout(180000),
+            () => config.transport.sign(body as never),
+          );
+          return json(res, 200, result);
+        } finally {
+          signing--;
+        }
       }
       return json(res, 404, { error: "not found" });
     } catch (error) {
@@ -43,4 +58,8 @@ export function createGuardianHttpServer(config: {
       return json(res, 500, { error: "internal error" });
     }
   });
+  server.requestTimeout = 10000;
+  server.headersTimeout = 10000;
+  server.maxConnections = 64;
+  return server;
 }
