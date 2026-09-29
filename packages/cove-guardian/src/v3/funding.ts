@@ -1,33 +1,28 @@
 import { operationSignal, readBoundedJson } from "@crclaunch/bitcoin";
+
 export interface OutPointRef {
   txid: string;
   vout: number;
 }
+
 export type FundingInputCode =
   | "FUNDING_UNCONFIRMED"
   | "FUNDING_HOLDS_TOKEN"
   | "FUNDING_CHECK_UNAVAILABLE"
   | "FUNDING_PREVOUT_MISMATCH";
+
 export type FundingInputVerdict =
-  | {
-      ok: true;
-    }
-  | {
-      ok: false;
-      code: FundingInputCode;
-      detail: string;
-    };
+  { ok: true } | { ok: false; code: FundingInputCode; detail: string };
+
 export interface FundingInputChecker {
   forValidation?(): FundingInputChecker;
   check(
     outpoint: OutPointRef,
     indexedHeight?: bigint,
-    expected?: {
-      script: Buffer;
-      valueSats: bigint;
-    },
+    expected?: { script: Buffer; valueSats: bigint },
   ): Promise<FundingInputVerdict>;
 }
+
 export interface TxOutReader {
   getTxout(
     txid: string,
@@ -45,9 +40,11 @@ export interface TxOutReader {
     chain?: string;
   }>;
 }
+
 export interface AssetLookup {
   describeAssets(outpoint: OutPointRef): Promise<string | null>;
 }
+
 const refuse = (
   code: FundingInputCode,
   detail: string,
@@ -56,26 +53,28 @@ const refuse = (
   code,
   detail,
 });
+
 export function chainFundingChecker(params: {
   chain: TxOutReader;
+
   isCoveCarrier: (outpoint: OutPointRef) => Promise<boolean>;
+
   assets?: AssetLookup;
   minConfirmations?: number;
   expectedChain?: string;
+  observation?: { blocks: number; bestBlockHash?: string; chain?: string };
 }): FundingInputChecker {
   const minConf = params.minConfirmations ?? 1;
   const scoped = (): FundingInputChecker => {
-    let observation: Promise<{
-      height: bigint;
-      hash: string;
-    }> | null = null;
+    let observation: Promise<{ height: bigint; hash: string }> | null = null;
     const getObservation = () => {
       observation ??= (async () => {
-        if (!params.chain.getBlockchainInfo)
+        if (!params.observation && !params.chain.getBlockchainInfo)
           throw new Error(
             "cannot compare funding confirmation with indexer cursor",
           );
-        const info = await params.chain.getBlockchainInfo();
+        const info =
+          params.observation ?? (await params.chain.getBlockchainInfo!());
         if (
           !Number.isSafeInteger(info.blocks) ||
           info.blocks < 0 ||
@@ -105,12 +104,7 @@ export function chainFundingChecker(params: {
           valueSats?: bigint;
           bestBlockHash?: string;
         } | null;
-        let core:
-          | {
-              height: bigint;
-              hash: string;
-            }
-          | undefined;
+        let core: { height: bigint; hash: string } | undefined;
         try {
           if (indexedHeight !== undefined) core = await getObservation();
           txout = await params.chain.getTxout(o.txid, o.vout, false);
@@ -142,6 +136,7 @@ export function chainFundingChecker(params: {
             `funding input ${at} is unconfirmed; wait for it to confirm`,
           );
         }
+
         if (indexedHeight !== undefined) {
           if (!core || txout.bestBlockHash !== core.hash) {
             return refuse(
@@ -205,25 +200,21 @@ export function chainFundingChecker(params: {
       scoped().check(outpoint, indexedHeight, expected),
   };
 }
+
 export function ordAssetLookup(
   baseUrl: string,
   opts: {
     timeoutMs?: number;
     fetchImpl?: typeof fetch;
-    budget?: {
-      acquire(signal: AbortSignal): Promise<() => Promise<void>>;
-    };
+    budget?: { acquire(signal: AbortSignal): Promise<() => Promise<void>> };
     maxResponseBytes?: number;
   } = {},
 ): AssetLookup {
   const base = baseUrl.replace(/\/+$/, "");
   const doFetch = opts.fetchImpl ?? fetch;
-  const timeoutMs = opts.timeoutMs ?? 5000;
+  const timeoutMs = opts.timeoutMs ?? 5_000;
   let active = 0;
-  const waiting: {
-    start: () => void;
-    abort: () => void;
-  }[] = [];
+  const waiting: { start: () => void; abort: () => void }[] = [];
   const acquire = (signal: AbortSignal): Promise<() => void> => {
     signal.throwIfAborted();
     if (waiting.length >= 32)
@@ -270,7 +261,7 @@ export function ordAssetLookup(
         }
         const body = (await readBoundedJson(
           res,
-          opts.maxResponseBytes ?? 256000,
+          opts.maxResponseBytes ?? 256_000,
           signal,
         )) as {
           indexed?: unknown;

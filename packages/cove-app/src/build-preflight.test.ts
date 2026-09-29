@@ -4,11 +4,12 @@ import type { CoreRpcProvider } from "@crclaunch/bitcoin";
 import type { GuardianTransitionSigner } from "@crclaunch/cove-guardian/v3";
 import { V3AppService } from "./service.js";
 import { loadV3AppConfig } from "./config.js";
+
 afterEach(() => vi.unstubAllGlobals());
 const script = "0014" + "11".repeat(20);
 const input = {
   tokenId: "22".repeat(32),
-  amountAtoms: 1000n * 100000000n,
+  amountAtoms: 1000n * 100_000_000n,
   ticker: "TEST",
   nonceHex: "33".repeat(32),
   walletScript: script,
@@ -31,7 +32,7 @@ function fixture() {
   });
   vi.stubGlobal("fetch", external);
   const db = {
-    execute: async () => ({ rows: [{ generation: "1" }] }),
+    execute: async () => ({ rows: [] }),
     select: () => ({
       from: (table: unknown) => ({
         where: async () =>
@@ -68,6 +69,7 @@ async function invoke(
 ) {
   return app[operation]({ ...input, ...overrides } as never);
 }
+
 describe("local transaction rejection before external requests", () => {
   it.each<Build>([
     "buildLaunch",
@@ -109,7 +111,7 @@ describe("local transaction rejection before external requests", () => {
   it("rejects non-lot redeem amounts without external work", async () => {
     const { app, external } = fixture();
     await expect(
-      invoke(app, "buildRedeem", { amountAtoms: 1001n * 100000000n }),
+      invoke(app, "buildRedeem", { amountAtoms: 1001n * 100_000_000n }),
     ).rejects.toThrow("TOKEN_AMOUNT_INVALID");
     expect(external).not.toHaveBeenCalled();
   });

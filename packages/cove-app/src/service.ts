@@ -25,6 +25,7 @@ import {
   isRpcNotFound,
   broadcastRecordedTransaction,
   type CoreRpcProvider,
+  type BlockchainInfo,
 } from "@crclaunch/bitcoin";
 import { buildBackingVaultV3 } from "@crclaunch/cove-vault";
 import {
@@ -113,6 +114,8 @@ import {
 } from "./psbt.js";
 import {
   resolveFundingUtxos,
+  resolveCachedFundingUtxos,
+  cachedBuildFundingChecker,
   validateFundingCandidates,
   type FundingCandidate,
   type ResolvedFunding,
@@ -149,7 +152,9 @@ import {
 import { getWalletPortfolio } from "./wallet-read.js";
 import { getV3Status } from "./health.js";
 import { readFeeObservation } from "./runtime-snapshot.js";
+
 bitcoin.initEccLib(ecc as unknown as Parameters<typeof bitcoin.initEccLib>[0]);
+
 export interface LaunchPrepareInput {
   ticker: string;
   displayName: string;
@@ -158,8 +163,10 @@ export interface LaunchPrepareInput {
   xUrl?: string | null;
   imageUrl?: string | null;
   nonceHex?: string;
+
   creatorScript?: string;
 }
+
 export interface LaunchPrepareResult {
   tokenId: string | null;
   ticker: string;
@@ -167,39 +174,38 @@ export interface LaunchPrepareResult {
   policyVersion: number;
   chainIdentity: string;
   publicCapAtoms: bigint;
+
   publicSupplyAtoms: bigint;
   curve: string;
   vaultAnchorSats: bigint;
+
   launchFeeSats: bigint;
 }
+
 export interface BackingQuote {
   tokenId: string;
   amountAtoms: bigint;
   stateHash: string;
-  backingOutpoint: {
-    txid: string;
-    vout: number;
-  };
+  backingOutpoint: { txid: string; vout: number };
   supplyBeforeAtoms: bigint;
   supplyAfterAtoms: bigint;
   backingBeforeSats: bigint;
   backingAfterSats: bigint;
   grossSats: bigint;
   feeSats: bigint;
+
   creatorFeeSats: bigint;
   feeBps: bigint;
   indexedHeight: bigint;
   indexedBlockHash: string;
   expiresAtHeight: bigint;
 }
+
 export interface RedeemQuote {
   tokenId: string;
   amountAtoms: bigint;
   stateHash: string;
-  backingOutpoint: {
-    txid: string;
-    vout: number;
-  };
+  backingOutpoint: { txid: string; vout: number };
   supplyBeforeAtoms: bigint;
   supplyAfterAtoms: bigint;
   backingBeforeSats: bigint;
@@ -208,32 +214,45 @@ export interface RedeemQuote {
   feeSats: bigint;
   netSats: bigint;
 }
+
 export interface IntentV3 {
   operation: "DEPLOY" | "BACKING_BUY" | "REDEEM" | "TRANSFER";
   tokenId: string | null;
   tokenAmountAtoms: bigint | null;
   grossSats: bigint | null;
   protocolFeeSats: bigint | null;
+
   creatorFeeSats?: bigint;
   creatorScript?: string;
   minerFeeSats: bigint;
   netSats: bigint | null;
+
   walletScript: string;
+
   ordinalsScript: string;
   stateHash: string | null;
   unsignedTxDigest: string;
+
   walletDeltaSats: bigint;
 }
+
 interface BackingRow {
   state: CoveStateV2;
   stateHash: string;
   input: ResolvedInput;
+  chainObservation?: BlockchainInfo;
 }
+
 const MAX_REDEEM_TOKEN_INPUTS = 4;
+
 const MAX_TRANSFER_TOKEN_INPUTS = 4;
-const DEFAULT_LISTING_BLOCKS = 1008n;
+
+const DEFAULT_LISTING_BLOCKS = 1_008n;
+
 const MAX_PENDING_BACKING_CHAIN = 24;
+
 const BACKING_SUCCESSOR_VOUT = 1;
+
 function assertRedeemPayoutIsPayable(params: {
   grossSats: bigint;
   feeSats: bigint;
@@ -252,10 +271,13 @@ function assertRedeemPayoutIsPayable(params: {
       `${check.minimumGrossSats} sats to be worth making. Sell a larger amount.`,
   );
 }
+
 export class V3AppService {
   readonly market: MarketService;
+
   readonly fundingChecker: FundingInputChecker;
   private readonly assets: AssetLookup | null;
+
   constructor(
     readonly db: Database,
     readonly provider: CoreRpcProvider,
@@ -273,18 +295,7 @@ export class V3AppService {
           ),
         })
       : null;
-    this.fundingChecker = chainFundingChecker({
-      chain: provider,
-      expectedChain:
-        config.network === "mainnet"
-          ? "main"
-          : config.network === "testnet"
-            ? "test"
-            : config.network,
-      isCoveCarrier: async (o) =>
-        (await getLiveTokenUtxosAtDb(db, config.network, [o])).length > 0,
-      assets: this.assets ?? undefined,
-    });
+    this.fundingChecker = this.createFundingChecker();
     this.market = new MarketService(
       db,
       provider,
@@ -302,6 +313,7 @@ export class V3AppService {
           ),
     );
   }
+
   private assertEnabled(): void {
     if (!this.config.enabled)
       throw new AppError("APP_DISABLED", "covs is disabled on this server");
@@ -312,6 +324,26 @@ export class V3AppService {
       throw new AppError("MAINNET_DISABLED", "mainnet mutations are not armed");
     }
   }
+
+  private createFundingChecker(
+    observation?: BlockchainInfo,
+  ): FundingInputChecker {
+    return chainFundingChecker({
+      chain: this.provider,
+      observation,
+      expectedChain:
+        this.config.network === "mainnet"
+          ? "main"
+          : this.config.network === "testnet"
+            ? "test"
+            : this.config.network,
+      isCoveCarrier: async (o) =>
+        (await getLiveTokenUtxosAtDb(this.db, this.config.network, [o]))
+          .length > 0,
+      assets: this.assets ?? undefined,
+    });
+  }
+
   private assertNetwork(): V3Network {
     if (
       this.config.network === "mainnet" &&
@@ -324,10 +356,12 @@ export class V3AppService {
     }
     return this.config.network;
   }
+
   private assertMutating(): V3Network {
     this.assertEnabled();
     return this.assertNetwork();
   }
+
   private assertCanaryAllowed(params: {
     tokenId?: string;
     walletScript?: string;
@@ -355,6 +389,7 @@ export class V3AppService {
       );
     }
   }
+
   private async requireHealthy(): Promise<HealthReport> {
     const health = await computeHealth({
       db: this.db,
@@ -372,6 +407,7 @@ export class V3AppService {
         "INDEXER_UNHEALTHY",
         "indexer behind by " + health.lag,
       );
+
     if (this.secondaryProvider) {
       const agreement = await checkCoreAgreement(
         this.provider,
@@ -386,6 +422,7 @@ export class V3AppService {
           `Core disagreement: ${agreement.detail ?? "unknown"}`,
         );
     }
+
     if (this.config.network === "mainnet") {
       if (!(await verifyMainnetGenesis(this.provider))) {
         throw new AppError(
@@ -405,6 +442,7 @@ export class V3AppService {
     }
     return health;
   }
+
   private validateTokenAmount(
     tokenId: string,
     amountAtoms: bigint,
@@ -420,6 +458,7 @@ export class V3AppService {
     )
       throw new AppError("TOKEN_AMOUNT_INVALID", "invalid token amount");
   }
+
   status() {
     return getV3Status({ db: this.db, config: this.config });
   }
@@ -443,19 +482,18 @@ export class V3AppService {
   }
   walletPortfolio(
     walletScript: string,
-    opts?: {
-      limit?: number;
-      offset?: number;
-    },
+    opts?: { limit?: number; offset?: number },
   ) {
     return getWalletPortfolio(this.db, this.config.network, walletScript, opts);
   }
+
   private async loadBacking(tokenId: string): Promise<BackingRow> {
     return this.followPendingBacking(
       tokenId,
       await this.loadConfirmedBacking(tokenId),
     );
   }
+
   private async loadQuoteBacking(tokenId: string) {
     const observation = await effectiveBackingObservation(
       this.db,
@@ -484,6 +522,7 @@ export class V3AppService {
       indexedBlockHash: observation.indexedHash,
     };
   }
+
   private async loadConfirmedBacking(tokenId: string): Promise<BackingRow> {
     const rows = await this.db
       .select()
@@ -517,6 +556,7 @@ export class V3AppService {
     };
     return confirmed;
   }
+
   private async loadBackingAt(
     tokenId: string,
     txid: string | null,
@@ -527,13 +567,11 @@ export class V3AppService {
       return this.followPendingBacking(tokenId, confirmed);
     return this.followPendingBacking(tokenId, confirmed, { txid, vout });
   }
+
   private async followPendingBacking(
     tokenId: string,
     confirmed: BackingRow,
-    stopAt?: {
-      txid: string;
-      vout: number;
-    },
+    stopAt?: { txid: string; vout: number },
   ): Promise<BackingRow> {
     let tip = confirmed;
     const visited: string[] = [];
@@ -600,7 +638,9 @@ export class V3AppService {
           "STATE_CHANGED",
           "the chain changed during pending verification",
         );
+      tip = { ...tip, chainObservation: currentChain };
     };
+
     for (let depth = 0; depth < MAX_PENDING_BACKING_CHAIN; depth++) {
       if (
         stopAt &&
@@ -617,7 +657,7 @@ export class V3AppService {
           tip.input.vout,
           {
             retry: false,
-            signal: AbortSignal.timeout(5000),
+            signal: AbortSignal.timeout(5_000),
           },
         );
       } catch {
@@ -626,9 +666,9 @@ export class V3AppService {
           "the pending branch cannot currently be observed",
         );
       }
-      let next: {
-        txid: string;
-      } | null = spendingTxid ? { txid: spendingTxid } : null;
+      let next: { txid: string } | null = spendingTxid
+        ? { txid: spendingTxid }
+        : null;
       if (spendingTxid === undefined) {
         membership ??= await readMembership();
         const candidates = await listSubmittedSpendsOfBacking(
@@ -686,6 +726,7 @@ export class V3AppService {
         return tip;
       }
       visited.push(next.txid);
+
       let raw: string;
       try {
         raw = await this.provider.getRawTransaction(next.txid);
@@ -697,6 +738,7 @@ export class V3AppService {
           "the pending backing transaction cannot currently be verified",
         );
       }
+
       let tx: bitcoin.Transaction;
       try {
         tx = bitcoin.Transaction.fromHex(raw);
@@ -727,6 +769,7 @@ export class V3AppService {
           "the pending backing transaction is invalid",
         );
       }
+
       if (
         !("tokenId" in envelope) ||
         !envelope.tokenId.equals(Buffer.from(tokenId, "hex"))
@@ -746,6 +789,7 @@ export class V3AppService {
           "the pending transaction does not move the backing vault",
         );
       }
+
       const vaultOut = tx.outs[BACKING_SUCCESSOR_VOUT];
       const expectedValue = RESERVE_ANCHOR_SATS + nextState.backingSats;
       const nextVault = buildBackingVaultV3({
@@ -764,6 +808,7 @@ export class V3AppService {
           "STATE_CHANGED",
           "the pending backing output cannot be verified",
         );
+
       tip = {
         state: nextState,
         stateHash: stateHashV2(nextState),
@@ -780,6 +825,7 @@ export class V3AppService {
       "the pending backing chain exceeds the verification limit",
     );
   }
+
   private overlayPendingBacking(
     view: CoveCanonicalView,
     tokenIdHex: string,
@@ -802,6 +848,7 @@ export class V3AppService {
         view.getTokenCreatorScript?.(tokenId) ?? null,
     };
   }
+
   private async creatorScriptOf(tokenId: string): Promise<Buffer> {
     const rows = await this.db
       .select({ creatorScript: schema.coveV3Tokens.creatorScript })
@@ -818,12 +865,10 @@ export class V3AppService {
       throw new AppError("TOKEN_NOT_FOUND", "token has no recorded creator");
     return Buffer.from(c, "hex");
   }
+
   private async loadView(
     tokenId: string,
-    relevantOutpoints: {
-      txid: string;
-      vout: number;
-    }[] = [],
+    relevantOutpoints: { txid: string; vout: number }[] = [],
   ): Promise<CoveCanonicalView> {
     return loadCanonicalViewSnapshotFromDb({
       db: this.db,
@@ -832,9 +877,11 @@ export class V3AppService {
       relevantOutpoints,
     });
   }
+
   async feeRates(): Promise<FeeRates> {
     return readFeeObservation(this.db, this.config.network);
   }
+
   private async assetsAt(o: {
     txid: string;
     vout: number;
@@ -849,6 +896,7 @@ export class V3AppService {
       );
     }
   }
+
   private async resolveFundingAndFee(params: {
     op: CoveOperation;
     wallet: ResolvedWalletIdentity;
@@ -859,16 +907,16 @@ export class V3AppService {
     discovery?: boolean;
     feeRateSatPerVb?: bigint;
     explicitMinerFeeSats?: bigint;
+    cachedFunding?: ResolvedFunding[];
   }): Promise<{
     inputs: ResolvedInput[];
     minerFeeSats: bigint;
     vsize: number;
     satPerVb: bigint;
   }> {
-    const resolved = await resolveFundingUtxos(
-      this.provider,
-      params.candidates,
-    );
+    const resolved =
+      params.cachedFunding ??
+      (await resolveFundingUtxos(this.provider, params.candidates));
     for (const f of resolved) {
       if (f.script.toString("hex") !== params.wallet.payments.script) {
         throw new AppError(
@@ -877,6 +925,7 @@ export class V3AppService {
         );
       }
     }
+
     const carriers = await getLiveTokenUtxosAtDb(
       this.db,
       this.config.network,
@@ -889,6 +938,7 @@ export class V3AppService {
       );
     }
     const rates = await this.feeRates();
+
     const standard =
       rates.tiers.find((t) => t.key === "standard") ?? rates.tiers[0]!;
     const feeRateSatPerVb =
@@ -898,6 +948,7 @@ export class V3AppService {
         : undefined);
     const shape = {
       tokenInputs: params.tokenInputs,
+
       fundingKind: params.wallet.payments.kind,
       tokenKind: params.wallet.ordinals.kind,
       walletScriptBytes: params.wallet.payments.script.length / 2,
@@ -932,17 +983,20 @@ export class V3AppService {
         satPerVb: fee.effectiveSatPerVb,
       };
     };
+
     const vaultOp = params.op === "BACKING_BUY" || params.op === "REDEEM";
     const pending = vaultOp ? resolved.filter((f) => f.confirmations < 1) : [];
     const usable = vaultOp
       ? resolved.filter((f) => f.confirmations >= 1)
       : resolved;
+
     let sorted = [...usable].sort((a, b) => {
       if (a.valueSats !== b.valueSats)
         return a.valueSats > b.valueSats ? -1 : 1;
       if (a.txid !== b.txid) return a.txid < b.txid ? -1 : 1;
       return a.vout - b.vout;
     });
+
     const toInput = (f: ResolvedFunding): ResolvedInput => ({
       txid: f.txid,
       vout: f.vout,
@@ -950,10 +1004,12 @@ export class V3AppService {
       valueSats: f.valueSats,
       publicKey: params.wallet.payments.publicKeyBuffer,
     });
+
     const noFunding = priceAt(0);
     if (params.targetSats + noFunding.minerFeeSats <= 0n) {
       return { inputs: [], ...noFunding };
     }
+
     const skippedAssets: string[] = [];
     let chosen: ResolvedFunding[] = [];
     let sum = 0n;
@@ -966,7 +1022,7 @@ export class V3AppService {
         const priced = priceAt(chosen.length);
         if (sum >= params.targetSats + priced.minerFeeSats) {
           for (const f of chosen) {
-            const held = await this.assetsAt(f);
+            const held = params.cachedFunding ? null : await this.assetsAt(f);
             if (held) {
               skippedAssets.push(`${f.txid}:${f.vout} (${held})`);
               sorted = sorted.filter((u) => u !== f);
@@ -980,6 +1036,7 @@ export class V3AppService {
     }
     const shortfall = priceAt(Math.max(1, chosen.length));
     const need = params.targetSats + shortfall.minerFeeSats;
+
     const twoAddress =
       params.wallet.payments.script !== params.wallet.ordinals.script;
     const pendingSats = pending.reduce((a, f) => a + f.valueSats, 0n);
@@ -999,6 +1056,7 @@ export class V3AppService {
           : ""),
     );
   }
+
   prepareLaunch(input: LaunchPrepareInput): LaunchPrepareResult {
     this.assertEnabled();
     const ticker = canonicalTicker(input.ticker);
@@ -1007,6 +1065,7 @@ export class V3AppService {
       : randomBytes(32);
     if (nonce.length !== 32)
       throw new AppError("TOKEN_AMOUNT_INVALID", "nonce must be 32 bytes");
+
     const creatorScript = input.creatorScript
       ? Buffer.from(input.creatorScript, "hex")
       : null;
@@ -1039,16 +1098,20 @@ export class V3AppService {
       launchFeeSats: LAUNCH_FEE_SATS,
     };
   }
+
   async buildLaunch(params: {
     ticker: string;
     nonceHex: string;
     walletScript: string;
+
     ordinalsScript?: string;
     walletPublicKey?: string;
     ordinalsPublicKey?: string;
     walletAddress: string | null;
     funding: FundingCandidate[];
+
     feeRateSatPerVb?: bigint;
+
     minerFeeSats?: bigint;
     metadata: TokenMetadataInput;
     idempotencyKey: string;
@@ -1064,6 +1127,7 @@ export class V3AppService {
     const metadataJson = validateMetadata(params.metadata);
     if (!/^[0-9a-f]{64}$/i.test(params.nonceHex))
       throw new AppError("TOKEN_AMOUNT_INVALID", "nonce must be 32-byte hex");
+
     const creatorScript = wallet.payments.scriptBuffer;
     const tokenId = computeTokenId({
       chainIdentity: this.config.chainIdentity,
@@ -1074,6 +1138,7 @@ export class V3AppService {
     }).toString("hex");
     this.assertCanaryAllowed({ tokenId, walletScript: params.walletScript });
     await this.requireHealthy();
+
     const { inputs: deployerInputs, minerFeeSats } =
       await this.resolveFundingAndFee({
         op: "DEPLOY",
@@ -1127,6 +1192,7 @@ export class V3AppService {
         tokenId,
         tokenAmountAtoms: 0n,
         grossSats: null,
+
         protocolFeeSats: LAUNCH_FEE_SATS,
         minerFeeSats: result.minerFeeSats,
         netSats: null,
@@ -1138,12 +1204,11 @@ export class V3AppService {
       },
     };
   }
+
   async submitLaunch(params: {
     sessionId: string;
     signedPsbtBase64: string;
-  }): Promise<{
-    txid: string;
-  }> {
+  }): Promise<{ txid: string }> {
     this.assertMutating();
     const session = await requireTxSession(this.db, params.sessionId);
     if (session.network !== this.config.network)
@@ -1232,6 +1297,7 @@ export class V3AppService {
       await deferSubmission(this.db, job).catch(() => {});
     }
   }
+
   mintLimits(): {
     maxMintAtoms: bigint;
     maxGrossSats: bigint | null;
@@ -1245,6 +1311,7 @@ export class V3AppService {
       }
     );
   }
+
   async quoteBuyForSats(
     tokenId: string,
     budgetSats: bigint,
@@ -1252,12 +1319,15 @@ export class V3AppService {
     amountAtoms: bigint;
     grossSats: bigint;
     feeSats: bigint;
+
     creatorFeeSats: bigint;
     carrierSats: bigint;
     totalSats: bigint;
+
     limitedBy: "budget" | "per-mint limit" | "supply";
     minGrossSats: bigint;
     maxGrossSats: bigint | null;
+
     minSpendSats: bigint | null;
   }> {
     const backing = await this.loadQuoteBacking(tokenId);
@@ -1283,6 +1353,7 @@ export class V3AppService {
       };
     };
     const limits = this.mintLimits();
+
     const perMintLots = limits.maxMintAtoms / ATOMS_PER_TOKEN / LOT_TOKENS;
     const remainingLots = remaining / LOT_TOKENS;
     const fits = (lots: bigint) => {
@@ -1292,6 +1363,7 @@ export class V3AppService {
         (limits.maxGrossSats === null || c.gross <= limits.maxGrossSats)
       );
     };
+
     let loLots = 0n;
     let hiLots = remainingLots < perMintLots ? remainingLots : perMintLots;
     while (loLots < hiLots) {
@@ -1301,6 +1373,7 @@ export class V3AppService {
     }
     const lo = loLots * LOT_TOKENS;
     const perMintTokens = perMintLots * LOT_TOKENS;
+
     let minSpendSats: bigint | null = null;
     if (remainingLots > 0n) {
       let a = 1n;
@@ -1328,6 +1401,7 @@ export class V3AppService {
       totalSats: 0n,
       limitedBy: "budget",
     } as const;
+
     if (lo === 0n) return nothing;
     const c = costOf(lo);
     if (c.gross < limits.minGrossSats) return nothing;
@@ -1348,6 +1422,7 @@ export class V3AppService {
       totalSats: c.total,
     };
   }
+
   async quoteBackingBuy(
     tokenId: string,
     amountAtoms: bigint,
@@ -1409,31 +1484,28 @@ export class V3AppService {
       expiresAtHeight: backing.indexedHeight + 2n,
     };
   }
+
   async buildBackingBuy(params: {
     tokenId: string;
     amountAtoms: bigint;
     quoteBinding: {
       stateHash: string;
-      backingOutpoint: {
-        txid: string;
-        vout: number;
-      };
+      backingOutpoint: { txid: string; vout: number };
       expiresAtHeight: bigint | null;
     };
     walletScript: string;
+
     ordinalsScript?: string;
     walletPublicKey?: string;
     ordinalsPublicKey?: string;
     walletAddress: string | null;
     funding: FundingCandidate[];
+
     feeRateSatPerVb?: bigint;
+
     minerFeeSats?: bigint;
     idempotencyKey: string;
-  }): Promise<{
-    sessionId: string;
-    psbtBase64: string;
-    intent: IntentV3;
-  }> {
+  }): Promise<{ sessionId: string; psbtBase64: string; intent: IntentV3 }> {
     this.assertMutating();
     this.validateTokenAmount(
       params.tokenId,
@@ -1463,9 +1535,13 @@ export class V3AppService {
           binding.expiresAtHeight < 0n))
     )
       throw new AppError("QUOTE_STALE", "invalid quote binding");
-    await this.loadConfirmedBacking(params.tokenId);
-    await this.requireHealthy();
-    const backing = await this.loadBacking(params.tokenId);
+    const backing = await this.loadQuoteBacking(params.tokenId);
+    const cachedFunding = await resolveCachedFundingUtxos(
+      this.db,
+      this.config.network,
+      wallet.payments.script,
+      params.funding,
+    );
     if (
       backing.stateHash !== params.quoteBinding.stateHash ||
       backing.input.txid !== params.quoteBinding.backingOutpoint.txid ||
@@ -1473,10 +1549,12 @@ export class V3AppService {
     ) {
       throw new AppError("QUOTE_STALE", "backing state changed since quote");
     }
+
     const discoveryTicker = this.config.discoveryEnvelope
       ? (await getV3TokenDetail(this.db, this.config.network, params.tokenId))
           ?.ticker
       : undefined;
+
     const { grossSats: quotedGrossSats } = applyMintV2(
       backing.state,
       params.amountAtoms,
@@ -1492,6 +1570,7 @@ export class V3AppService {
     const { inputs: buyerInputs, minerFeeSats } =
       await this.resolveFundingAndFee({
         op: "BACKING_BUY",
+        cachedFunding,
         wallet,
         candidates: params.funding,
         targetSats:
@@ -1513,6 +1592,7 @@ export class V3AppService {
       recoveryKeyXOnly: this.config.recoveryKeyXOnly,
       recoveryProfile: this.config.recoveryProfile,
       buyerInputs,
+
       buyerCarrierScript: wallet.ordinals.scriptBuffer,
       buyerChangeScript: wallet.payments.scriptBuffer,
       feeScript: this.config.feeScript,
@@ -1540,7 +1620,7 @@ export class V3AppService {
       buyFeeBps: this.config.buyFeeBps,
       buyFeeFlatSats: this.config.buyFeeFlatSats,
       discoveryTicker,
-      fundingChecker: this.fundingChecker,
+      fundingChecker: cachedBuildFundingChecker(cachedFunding),
     };
     const checked = await validateMintTransitionV3({
       ...req,
@@ -1589,12 +1669,11 @@ export class V3AppService {
       },
     };
   }
+
   async submitBackingBuy(params: {
     sessionId: string;
     signedPsbtBase64: string;
-  }): Promise<{
-    txid: string;
-  }> {
+  }): Promise<{ txid: string }> {
     this.assertMutating();
     const session = await requireTxSession(this.db, params.sessionId);
     if (session.network !== this.config.network)
@@ -1620,14 +1699,15 @@ export class V3AppService {
         validateInputSignature(psbt, i);
         psbt.finalizeInput(i);
       }
+      const backing = await this.loadBackingAt(
+        session.tokenId!,
+        session.backingTxid,
+        session.backingVout,
+      );
       const view = this.overlayPendingBacking(
         await this.loadView(session.tokenId!),
         session.tokenId!,
-        await this.loadBackingAt(
-          session.tokenId!,
-          session.backingTxid,
-          session.backingVout,
-        ),
+        backing,
       );
       const discoveryTicker = this.config.discoveryEnvelope
         ? (
@@ -1649,7 +1729,7 @@ export class V3AppService {
         buyFeeBps: this.config.buyFeeBps,
         buyFeeFlatSats: this.config.buyFeeFlatSats,
         discoveryTicker,
-        fundingChecker: this.fundingChecker,
+        fundingChecker: this.createFundingChecker(backing.chainObservation),
       });
       if (!signed.ok) {
         const transient = [
@@ -1698,6 +1778,7 @@ export class V3AppService {
       await deferSubmission(this.db, job).catch(() => {});
     }
   }
+
   async quoteRedeem(
     tokenId: string,
     amountAtoms: bigint,
@@ -1717,6 +1798,7 @@ export class V3AppService {
       this.config.redeemFeeBps,
       this.config.redeemFeeFlatSats,
     );
+
     assertRedeemPayoutIsPayable({
       grossSats: gross,
       feeSats: fee,
@@ -1737,23 +1819,24 @@ export class V3AppService {
       netSats: gross - fee,
     };
   }
+
   async buildRedeem(params: {
     tokenId: string;
     amountAtoms: bigint;
     walletScript: string;
+
     ordinalsScript?: string;
     walletPublicKey?: string;
     ordinalsPublicKey?: string;
     walletAddress: string | null;
+
     feeRateSatPerVb?: bigint;
+
     minerFeeSats?: bigint;
     idempotencyKey: string;
+
     funding?: FundingCandidate[];
-  }): Promise<{
-    sessionId: string;
-    psbtBase64: string;
-    intent: IntentV3;
-  }> {
+  }): Promise<{ sessionId: string; psbtBase64: string; intent: IntentV3 }> {
     this.assertMutating();
     this.validateTokenAmount(
       params.tokenId,
@@ -1767,6 +1850,7 @@ export class V3AppService {
     const wallet = resolveWalletIdentity(walletIdentityFrom(params));
     validateFundingCandidates(params.funding ?? []);
     await this.loadConfirmedBacking(params.tokenId);
+
     const tokenUtxos = await getTokenUtxosByScriptDb(
       this.db,
       this.config.network,
@@ -1776,6 +1860,7 @@ export class V3AppService {
     const total = mine.reduce((s, u) => s + u.amountAtoms, 0n);
     if (total < params.amountAtoms)
       throw new AppError("TOKEN_AMOUNT_INVALID", "insufficient token balance");
+
     const sorted = [...mine].sort((a, b) =>
       a.amountAtoms !== b.amountAtoms
         ? a.amountAtoms > b.amountAtoms
@@ -1803,6 +1888,7 @@ export class V3AppService {
     }
     await this.requireHealthy();
     const backing = await this.loadBacking(params.tokenId);
+
     const tokenInputs: ResolvedInput[] = selected.map((u) => ({
       txid: u.txid,
       vout: u.vout,
@@ -1814,11 +1900,13 @@ export class V3AppService {
       (s, u) => s + u.amountAtoms,
       0n,
     );
+
     assertRedeemPayoutIsPayable({
       grossSats: grossRedeem(
         backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
         params.amountAtoms / ATOMS_PER_TOKEN,
       ),
+
       feeSats: redeemFeeSats(
         grossRedeem(
           backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
@@ -1854,6 +1942,7 @@ export class V3AppService {
       recoveryKeyXOnly: this.config.recoveryKeyXOnly,
       recoveryProfile: this.config.recoveryProfile,
       sellerPayoutScript: wallet.payments.scriptBuffer,
+
       sellerChangeScript: wallet.ordinals.scriptBuffer,
       feeScript: this.config.feeScript,
       minerFeeSats,
@@ -1882,6 +1971,7 @@ export class V3AppService {
       redeemFeeFlatSats: this.config.redeemFeeFlatSats,
       fundingChecker: this.fundingChecker,
     };
+
     const checked = await validateRedeemTransitionV3({
       ...req,
       guardianXOnly: this.config.guardianXOnly,
@@ -1927,12 +2017,11 @@ export class V3AppService {
       },
     };
   }
+
   async submitRedeem(params: {
     sessionId: string;
     signedPsbtBase64: string;
-  }): Promise<{
-    txid: string;
-  }> {
+  }): Promise<{ txid: string }> {
     this.assertMutating();
     const session = await requireTxSession(this.db, params.sessionId);
     if (session.network !== this.config.network)
@@ -1958,6 +2047,7 @@ export class V3AppService {
         validateInputSignature(psbt, i);
         psbt.finalizeInput(i);
       }
+
       const spent = psbt.txInputs.map((i) => ({
         txid: Buffer.from(i.hash).reverse().toString("hex"),
         vout: i.index,
@@ -2030,24 +2120,24 @@ export class V3AppService {
       await deferSubmission(this.db, job).catch(() => {});
     }
   }
+
   async buildTransfer(params: {
     tokenId: string;
     amountAtoms: bigint;
     recipientScript: string;
     walletScript: string;
+
     ordinalsScript?: string;
     walletPublicKey?: string;
     ordinalsPublicKey?: string;
     walletAddress: string | null;
     funding: FundingCandidate[];
+
     feeRateSatPerVb?: bigint;
+
     minerFeeSats?: bigint;
     idempotencyKey: string;
-  }): Promise<{
-    sessionId: string;
-    psbtBase64: string;
-    intent: IntentV3;
-  }> {
+  }): Promise<{ sessionId: string; psbtBase64: string; intent: IntentV3 }> {
     this.assertMutating();
     this.validateTokenAmount(params.tokenId, params.amountAtoms);
     const wallet = resolveWalletIdentity(walletIdentityFrom(params));
@@ -2069,6 +2159,7 @@ export class V3AppService {
     const total = mine.reduce((s, u) => s + u.amountAtoms, 0n);
     if (total < params.amountAtoms)
       throw new AppError("TOKEN_AMOUNT_INVALID", "insufficient token balance");
+
     const sorted = [...mine].sort((a, b) =>
       a.amountAtoms !== b.amountAtoms
         ? a.amountAtoms > b.amountAtoms
@@ -2095,6 +2186,7 @@ export class V3AppService {
       );
     }
     await this.requireHealthy();
+
     const tokenInputs: ResolvedInput[] = selected.map((u) => ({
       txid: u.txid,
       vout: u.vout,
@@ -2107,10 +2199,7 @@ export class V3AppService {
       0n,
     );
     const changeAtoms = tokenInputTotalAtoms - params.amountAtoms;
-    const tokenOutputs: {
-      script: Buffer;
-      amountAtoms: bigint;
-    }[] = [
+    const tokenOutputs: { script: Buffer; amountAtoms: bigint }[] = [
       {
         script: Buffer.from(params.recipientScript, "hex"),
         amountAtoms: params.amountAtoms,
@@ -2121,6 +2210,7 @@ export class V3AppService {
         script: wallet.ordinals.scriptBuffer,
         amountAtoms: changeAtoms,
       });
+
     const carrierSatsOut = BigInt(tokenOutputs.length) * TOKEN_CARRIER_SATS;
     const carrierSatsIn = BigInt(tokenInputs.length) * TOKEN_CARRIER_SATS;
     const { inputs: funderInputs, minerFeeSats } =
@@ -2181,12 +2271,11 @@ export class V3AppService {
       },
     };
   }
+
   async submitTransfer(params: {
     sessionId: string;
     signedPsbtBase64: string;
-  }): Promise<{
-    txid: string;
-  }> {
+  }): Promise<{ txid: string }> {
     this.assertMutating();
     const session = await requireTxSession(this.db, params.sessionId);
     if (session.network !== this.config.network)
@@ -2253,6 +2342,7 @@ export class V3AppService {
       await deferSubmission(this.db, job).catch(() => {});
     }
   }
+
   async txStatus(txid: string) {
     const result = await this.db
       .execute(sql`select s.status as session_status, e.block_height::text as confirmed_height,
@@ -2318,9 +2408,8 @@ export class V3AppService {
       stale: false,
     };
   }
-  async reconcileAppSessions(): Promise<{
-    confirmed: number;
-  }> {
+
+  async reconcileAppSessions(): Promise<{ confirmed: number }> {
     return this.db.transaction(async (tx) => {
       const confirmed =
         await tx.execute(sql`update cove_v3_app_transactions s set status = 'CONFIRMED', updated_at = clock_timestamp()
@@ -2338,15 +2427,19 @@ export class V3AppService {
       return { confirmed: confirmed.rows.length };
     });
   }
+
   async prepareListing(params: {
     tokenId: string;
     sourceTxid: string;
     sourceVout: number;
     amountAtoms: bigint;
     totalPriceSats: bigint;
+
     expiryBlocks?: bigint;
+
     expiryHeight?: bigint;
     walletScript: string;
+
     ordinalsScript?: string;
     walletPublicKey?: string;
     ordinalsPublicKey?: string;
@@ -2373,6 +2466,7 @@ export class V3AppService {
           isNull(schema.coveV3TokenUtxos.spentByTxid),
         ),
       );
+
     const u = utxoRows[0];
     if (u && u.amountAtoms !== params.amountAtoms) {
       throw new AppError(
@@ -2389,6 +2483,7 @@ export class V3AppService {
     const nonce = Buffer.from(params.nonceHex, "hex");
     if (nonce.length !== 32)
       throw new AppError("TOKEN_AMOUNT_INVALID", "nonce must be 32 bytes");
+
     const expiryHeight =
       params.expiryBlocks !== undefined && params.expiryBlocks > 0n
         ? tip + params.expiryBlocks
@@ -2410,6 +2505,7 @@ export class V3AppService {
       orderVersion: 1,
       chainIdentity: this.config.chainIdentity,
       tokenId: params.tokenId,
+
       sellerTokenScript: wallet.ordinals.script,
       sellerPayoutScript: wallet.payments.script,
       sellerTokenChangeScript: wallet.ordinals.script,
@@ -2423,12 +2519,14 @@ export class V3AppService {
       nonce: nonce.toString("hex"),
     };
     const listingId = listingIdOf(listing);
+
     const listingPsbtBase64 = await this.market.buildListingPsbtFor(
       listing,
       wallet.ordinals.publicKey || undefined,
     );
     return { listing, listingId, listingPsbtBase64, expiryHeight };
   }
+
   createListing(
     listing: ListingV1,
     presignedPsbtBase64: string,
@@ -2445,6 +2543,7 @@ export class V3AppService {
       sellerTokenPublicKey,
     });
   }
+
   prepareCancellation(listingId: string, nonceHex: string) {
     const cancelNonce = Buffer.from(nonceHex, "hex");
     if (cancelNonce.length !== 32)
@@ -2460,6 +2559,7 @@ export class V3AppService {
       message: cancellationMessageToSign(c),
     };
   }
+
   cancelListing(listingId: string, nonceHex: string, signatureB64: string) {
     this.assertMutating();
     return this.market.cancelListing(
@@ -2468,10 +2568,12 @@ export class V3AppService {
       signatureB64,
     );
   }
+
   reserveListing(input: Parameters<MarketService["reserveListing"]>[0]) {
     this.assertMutating();
     return this.market.reserveListing(input);
   }
+
   preflightReserveListing(
     input: Parameters<MarketService["preflightReserveListing"]>[0],
   ) {
@@ -2480,20 +2582,16 @@ export class V3AppService {
   }
   buildFillPsbt(
     fillId: string,
-    fee: {
-      feeRateSatPerVb?: bigint;
-      minerFeeSats?: bigint;
-    },
+    fee: { feeRateSatPerVb?: bigint; minerFeeSats?: bigint },
   ) {
     this.assertMutating();
     return this.market.buildFillPsbt(fillId, fee);
   }
+
   async submitBuyerSignature(
     fillId: string,
     psbtB64: string,
-  ): Promise<{
-    txid: string;
-  }> {
+  ): Promise<{ txid: string }> {
     this.assertMutating();
     await this.market.submitBuyerSignedPsbt(fillId, psbtB64);
     return this.finalizeAndBroadcastFill(fillId);
@@ -2534,9 +2632,7 @@ export class V3AppService {
       .limit(1);
     return rows[0] ?? null;
   }
-  async finalizeAndBroadcastFill(fillId: string): Promise<{
-    txid: string;
-  }> {
+  async finalizeAndBroadcastFill(fillId: string): Promise<{ txid: string }> {
     this.assertMutating();
     const fills = await this.getFill(fillId);
     const fill = fills[0];
@@ -2571,12 +2667,8 @@ export class V3AppService {
       this.config.redeemFeeBps,
     );
   }
-  async listListings(
-    opts: {
-      tokenId?: string;
-      limit?: number;
-    } = {},
-  ) {
+
+  async listListings(opts: { tokenId?: string; limit?: number } = {}) {
     const limit = Math.min(opts.limit ?? 100, 200);
     const base = [
       eq(schema.coveV3MarketListings.network, this.config.network),
@@ -2585,6 +2677,7 @@ export class V3AppService {
     const cond = opts.tokenId
       ? and(...base, eq(schema.coveV3MarketListings.tokenId, opts.tokenId))
       : and(...base);
+
     const rows = await this.db
       .select({
         listing: schema.coveV3MarketListings,
@@ -2596,13 +2689,16 @@ export class V3AppService {
         and(
           eq(schema.coveV3Tokens.network, schema.coveV3MarketListings.network),
           eq(schema.coveV3Tokens.tokenId, schema.coveV3MarketListings.tokenId),
+
           eq(schema.coveV3Tokens.canonical, true),
         ),
       )
       .where(cond)
       .limit(limit);
+
     return rows.map((r) => ({ ...publicListing(r.listing), ticker: r.ticker }));
   }
+
   private submissionError(error: unknown): Error {
     if (error instanceof SubmissionError)
       return new AppError(
@@ -2611,18 +2707,13 @@ export class V3AppService {
       );
     return error instanceof Error ? error : new Error("submission failed");
   }
+
   private async beginSessionSubmission(
     session: TxSessionRow,
     signedPsbtBase64: string,
   ): Promise<
-    | {
-        job: Submission;
-        psbt: bitcoin.Psbt;
-      }
-    | {
-        txid: string;
-        submissionState: "saved" | "broadcast";
-      }
+    | { job: Submission; psbt: bitcoin.Psbt }
+    | { txid: string; submissionState: "saved" | "broadcast" }
   > {
     const incoming = parsePsbt(
       signedPsbtBase64,
@@ -2670,13 +2761,11 @@ export class V3AppService {
       throw this.submissionError(error);
     }
   }
+
   private async broadcastSubmission(
     job: Submission,
     validated?: ValidatedCoveTransaction,
-  ): Promise<{
-    txid: string;
-    submissionState: "saved" | "broadcast";
-  }> {
+  ): Promise<{ txid: string; submissionState: "saved" | "broadcast" }> {
     if (job.phase === "SIGNING") {
       if (!validated)
         throw new AppError(
@@ -2708,11 +2797,12 @@ export class V3AppService {
       .limit(1);
     try {
       if (!confirmed.length) {
-        await this.requireHealthy();
+        const health = await this.requireHealthy();
         await broadcastRecordedTransaction(
           this.provider,
           { rawTxHex: job.rawTxHex, txid: job.txid },
           this.config.network,
+          healthChainObservation(health, this.provider),
         );
       }
       await publishSubmission(this.db, job);
@@ -2721,6 +2811,7 @@ export class V3AppService {
       return { txid: job.txid, submissionState: "saved" };
     }
   }
+
   async reconcileSubmissionConflicts(): Promise<number> {
     const result = await this.db
       .execute(sql`update cove_v3_submissions s set conflicted = v.conflict,
@@ -2733,9 +2824,8 @@ export class V3AppService {
       where s.id = v.id returning s.id`);
     return result.rows.length;
   }
-  async recoverSubmissions(limit = 2): Promise<{
-    recovered: number;
-  }> {
+
+  async recoverSubmissions(limit = 2): Promise<{ recovered: number }> {
     this.assertMutating();
     let recovered = 0;
     for (const job of await dueSubmissions(

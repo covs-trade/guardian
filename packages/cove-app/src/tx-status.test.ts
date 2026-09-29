@@ -6,6 +6,7 @@ import type { Database } from "@crclaunch/db";
 import type { GuardianTransitionSigner } from "@crclaunch/cove-guardian/v3";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
+
 const txid = "ab".repeat(32);
 function fixture(results: unknown[][], observeTransaction = vi.fn()) {
   const where = vi.fn(() => {
@@ -53,6 +54,7 @@ function fixture(results: unknown[][], observeTransaction = vi.fn()) {
   );
   return { app, provider, db, select };
 }
+
 describe("public transaction status", () => {
   function statusFixture(row: Record<string, unknown>) {
     const f = fixture([]);
@@ -154,6 +156,7 @@ describe("public transaction status", () => {
     });
   });
 });
+
 it("reconciliation never fails a broadcast session when indexing has not confirmed it", async () => {
   const { app, provider, db } = fixture([[{ id: "session", txid }], []]);
   Object.assign(db, {
@@ -165,6 +168,7 @@ it("reconciliation never fails a broadcast session when indexing has not confirm
   expect(provider.getRawTransaction).not.toHaveBeenCalled();
   expect(provider.observeTransaction).not.toHaveBeenCalled();
 });
+
 it("public fill status selects only allowlisted columns", async () => {
   const { app, select } = fixture([
     [{ id: "fill", status: "BROADCAST", txid }],
@@ -184,6 +188,7 @@ it("public fill status selects only allowlisted columns", async () => {
     "updatedAt",
   ]);
 });
+
 it.each([
   [
     new RpcError("getrawtransaction", "rpc", "not found", 500, -5),
@@ -209,26 +214,28 @@ it.each([
     ).rejects.toThrow(String(code));
   },
 );
+
 it("a positively absent pending candidate leaves its verified unspent parent tradable", async () => {
   const { app, provider } = fixture([[{ txid, operation: "BACKING_BUY" }]]);
   vi.mocked(provider.getMempoolSnapshot).mockResolvedValue(new Set());
   const script = Buffer.from("5120" + "aa".repeat(32), "hex");
   vi.mocked(provider.getTxout).mockResolvedValue({
     scriptPubKeyHex: script.toString("hex"),
-    valueSats: 10000n,
+    valueSats: 10_000n,
     confirmations: 1,
   });
   const backing = {
-    input: { txid: "ef".repeat(32), vout: 1, script, valueSats: 10000n },
+    input: { txid: "ef".repeat(32), vout: 1, script, valueSats: 10_000n },
   };
   const follow = app as unknown as {
     followPendingBacking(id: string, backing: unknown): Promise<unknown>;
   };
-  expect(await follow.followPendingBacking("cd".repeat(32), backing)).toBe(
-    backing,
-  );
+  expect(
+    await follow.followPendingBacking("cd".repeat(32), backing),
+  ).toMatchObject(backing);
   expect(provider.getRawTransaction).not.toHaveBeenCalled();
 });
+
 it("a failed membership lookup cannot expose the parent as tradable", async () => {
   const { app, provider } = fixture([[{ txid, operation: "BACKING_BUY" }]]);
   vi.mocked(provider.getMempoolSnapshot).mockRejectedValue(
@@ -242,16 +249,14 @@ it("a failed membership lookup cannot expose the parent as tradable", async () =
   ).rejects.toThrow("CORE_UNAVAILABLE");
   expect(provider.getTxout).not.toHaveBeenCalled();
 });
+
 it("an absent or changed pending ancestor requires a new quote when submitting its descendant", async () => {
   const { app, provider } = fixture([[]]);
   const follow = app as unknown as {
     followPendingBacking(
       id: string,
       backing: unknown,
-      stopAt: {
-        txid: string;
-        vout: number;
-      },
+      stopAt: { txid: string; vout: number },
     ): Promise<unknown>;
   };
   await expect(

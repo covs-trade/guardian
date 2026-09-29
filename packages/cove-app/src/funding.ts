@@ -1,15 +1,20 @@
 import type { CoreRpcProvider } from "@crclaunch/bitcoin";
+import { walletFundingSnapshot, type Database } from "@crclaunch/db";
+import type { FundingInputChecker } from "@crclaunch/cove-guardian/v3";
 import { AppError } from "./errors.js";
+
 export interface FundingCandidate {
   txid: string;
   vout: number;
 }
+
 export const MAX_FUNDING_INPUTS = 64;
 const FUNDING_LOOKUP_CONCURRENCY = 4;
 const GLOBAL_FUNDING_LOOKUP_CONCURRENCY = 16;
 const MAX_PENDING_FUNDING_LOOKUPS = 128;
 let activeFundingLookups = 0;
 const fundingLookupWaiters: Array<() => void> = [];
+
 async function withFundingLookupSlot<T>(work: () => Promise<T>): Promise<T> {
   if (activeFundingLookups < GLOBAL_FUNDING_LOOKUP_CONCURRENCY) {
     activeFundingLookups++;
@@ -20,6 +25,7 @@ async function withFundingLookupSlot<T>(work: () => Promise<T>): Promise<T> {
         "funding lookup capacity is full; retry shortly",
       );
     }
+
     await new Promise<void>((resolve) => fundingLookupWaiters.push(resolve));
   }
   try {
@@ -30,6 +36,7 @@ async function withFundingLookupSlot<T>(work: () => Promise<T>): Promise<T> {
     else activeFundingLookups--;
   }
 }
+
 export function validateFundingCandidates(
   candidates: FundingCandidate[],
 ): void {
@@ -47,7 +54,7 @@ export function validateFundingCandidates(
       !/^[0-9a-fA-F]{64}$/.test(candidate.txid) ||
       !Number.isInteger(candidate.vout) ||
       candidate.vout < 0 ||
-      candidate.vout > 4294967295
+      candidate.vout > 0xffff_ffff
     ) {
       throw new AppError(
         "FUNDING_INPUT_INVALID",
@@ -60,13 +67,16 @@ export function validateFundingCandidates(
     seen.add(key);
   }
 }
+
 export interface ResolvedFunding {
   txid: string;
   vout: number;
   script: Buffer;
   valueSats: bigint;
+
   confirmations: number;
 }
+
 export async function resolveFundingUtxo(
   provider: CoreRpcProvider,
   c: FundingCandidate,
@@ -85,6 +95,7 @@ export async function resolveFundingUtxo(
     confirmations: txout.confirmations,
   };
 }
+
 export async function resolveFundingUtxos(
   provider: CoreRpcProvider,
   candidates: FundingCandidate[],
@@ -106,6 +117,7 @@ export async function resolveFundingUtxos(
   await Promise.all(workers);
   return resolved;
 }
+
 export function selectFunding(
   utxos: ResolvedFunding[],
   requiredSats: bigint,
@@ -126,4 +138,65 @@ export function selectFunding(
     "INSUFFICIENT_BTC",
     `wallet has ${sum} sats but ${requiredSats} required`,
   );
+}
+
+export async function resolveCachedFundingUtxos(
+  db: Database,
+  network: string,
+  walletScript: string,
+  candidates: FundingCandidate[],
+): Promise<ResolvedFunding[]> {
+  validateFundingCandidates(candidates);
+  if (!candidates.length) return [];
+  const coins = await walletFundingSnapshot(db, network, walletScript);
+  const byOutpoint = new Map(
+    coins?.map((coin) => [`${coin.txid.toLowerCase()}:${coin.vout}`, coin]),
+  );
+  return candidates.map((candidate) => {
+    const coin = byOutpoint.get(
+      `${candidate.txid.toLowerCase()}:${candidate.vout}`,
+    );
+    if (!coin)
+      throw new AppError(
+        "FUNDING_INPUT_INVALID",
+        "wallet funding data is missing; refresh your wallet and retry",
+      );
+    return {
+      txid: coin.txid,
+      vout: coin.vout,
+      script: Buffer.from(walletScript, "hex"),
+      valueSats: BigInt(coin.valueSats),
+      confirmations: coin.confirmations,
+    };
+  });
+}
+
+export function cachedBuildFundingChecker(
+  inputs: ResolvedFunding[],
+): FundingInputChecker {
+  const coins = new Map(
+    inputs.map((coin) => [`${coin.txid}:${coin.vout}`, coin]),
+  );
+  return {
+    async check(point, _height, expected) {
+      const coin = coins.get(`${point.txid}:${point.vout}`);
+      if (!coin || coin.confirmations < 1)
+        return {
+          ok: false,
+          code: "FUNDING_UNCONFIRMED",
+          detail: "funding is not confirmed in the wallet cache",
+        };
+      if (
+        !expected ||
+        !coin.script.equals(expected.script) ||
+        coin.valueSats !== expected.valueSats
+      )
+        return {
+          ok: false,
+          code: "FUNDING_PREVOUT_MISMATCH",
+          detail: "funding does not match the wallet cache",
+        };
+      return { ok: true };
+    },
+  };
 }

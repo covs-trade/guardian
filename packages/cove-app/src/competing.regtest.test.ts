@@ -12,6 +12,7 @@ import {
   claimSubmission,
   saveSignedSubmission,
   dueSubmissions,
+  saveWalletFundingSnapshot,
 } from "@crclaunch/db";
 import {
   V3IndexerState,
@@ -32,9 +33,13 @@ import { PostgresGuardianAudit } from "./audit.js";
 import { DEV_RISK_POLICY } from "./transition-signer.js";
 import { indexedBackingConflict } from "./backing-conflict.js";
 import { PendingObservationWorker } from "./pending-observations.js";
-import { saveChainObservation } from "./runtime-snapshot.js";
+import {
+  saveChainObservation,
+  saveFeeObservation,
+} from "./runtime-snapshot.js";
 import { V3AppService } from "./service.js";
 import { loadV3AppConfig } from "./config.js";
+
 bitcoin.initEccLib(ecc as unknown as Parameters<typeof bitcoin.initEccLib>[0]);
 const databaseUrl = process.env.SUBMISSION_TEST_DATABASE_URL;
 const rpcUrl = process.env.COMPETITION_REGTEST_RPC_URL;
@@ -46,6 +51,7 @@ const isolated =
   dbAddress.pathname === "/submissions_test" &&
   rpcAddress?.hostname === "127.0.0.1" &&
   rpcAddress.port === "18453";
+
 describe.skipIf(!isolated)(
   "competing vault spends on isolated Bitcoin Core and PostgreSQL",
   () => {
@@ -73,14 +79,12 @@ describe.skipIf(!isolated)(
                   Buffer.from("competition-test:test-only").toString("base64"),
               },
               body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-              signal: AbortSignal.timeout(10000),
+              signal: AbortSignal.timeout(10_000),
             },
           );
           const body = (await response.json()) as {
             result: T;
-            error?: {
-              message: string;
-            };
+            error?: { message: string };
           };
           if (!response.ok || body.error)
             throw new Error(
@@ -124,7 +128,7 @@ describe.skipIf(!isolated)(
           const raw = await rpc<string>("getrawtransaction", [txid]);
           const tx = bitcoin.Transaction.fromHex(raw),
             vout = tx.outs.findIndex(
-              (o) => o.script.equals(payment.output!) && o.value === 10000000,
+              (o) => o.script.equals(payment.output!) && o.value === 10_000_000,
             );
           expect(vout).toBeGreaterThanOrEqual(0);
           funding.push({
@@ -132,7 +136,7 @@ describe.skipIf(!isolated)(
             vout,
             script: payment.output!,
             publicKey,
-            valueSats: 10000000n,
+            valueSats: 10_000_000n,
           });
         }
         await rpc("generatetoaddress", [1, minerAddress]);
@@ -215,7 +219,7 @@ describe.skipIf(!isolated)(
           localSigningBackend(guardian),
           journal,
           audit,
-          { ...DEV_RISK_POLICY, maxGrossSats: 1000000n },
+          { ...DEV_RISK_POLICY, maxGrossSats: 1_000_000n },
         );
         const fundingChecker = chainFundingChecker({
           chain: provider,
@@ -224,7 +228,7 @@ describe.skipIf(!isolated)(
         });
         const makeMint = (
           coin: (typeof funding)[number],
-          amount = 1000000n * 100000000n,
+          amount = 1_000_000n * 100_000_000n,
           minerFeeSats = 1000n,
           prevState = deploy.s0,
           backing = { txid: deployTxid, script: deploy.vault.scriptPubKey },
@@ -236,7 +240,7 @@ describe.skipIf(!isolated)(
             prevBacking: {
               ...backing,
               vout: 1,
-              valueSats: 10000n + prevState.backingSats,
+              valueSats: 10_000n + prevState.backingSats,
             },
             mintAmountAtoms: amount,
             guardianXOnly,
@@ -253,10 +257,10 @@ describe.skipIf(!isolated)(
           return mint;
         };
         const a = makeMint(funding[1]!),
-          b = makeMint(funding[2]!, 2000000n * 100000000n, 10000n);
+          b = makeMint(funding[2]!, 2_000_000n * 100_000_000n, 10_000n);
         const request = {
           view,
-          maxMinerFeeSats: 20000n,
+          maxMinerFeeSats: 20_000n,
           network: "regtest" as const,
           recoveryKeyXOnly,
           feeScript,
@@ -322,7 +326,7 @@ describe.skipIf(!isolated)(
         const config = {
           ...loadV3AppConfig({ COVE_NETWORK: "regtest" }),
           mintLimits: {
-            maxMintAtoms: 10000000n * 100000000n,
+            maxMintAtoms: 10_000_000n * 100_000_000n,
             maxGrossSats: null,
             minGrossSats: 0n,
           },
@@ -343,12 +347,7 @@ describe.skipIf(!isolated)(
           followPendingBacking(
             id: string,
             backing: unknown,
-          ): Promise<{
-            input: {
-              txid: string;
-            };
-            state: typeof deploy.s0;
-          }>;
+          ): Promise<{ input: { txid: string }; state: typeof deploy.s0 }>;
         };
         await db.insert(schema.coveV3AppTransactions).values(
           Array.from({ length: 100 }, (_, i) => ({
@@ -363,6 +362,7 @@ describe.skipIf(!isolated)(
             idempotencyKey: randomUUID(),
           })),
         );
+        let cachedSubmitChecked = false;
         const compare = async (expectedTxid: string) => {
           for (let current = expectedTxid; current !== deployTxid;) {
             const accepted = bitcoin.Transaction.fromHex(
@@ -392,7 +392,7 @@ describe.skipIf(!isolated)(
           expect((await projections.refresh()).published).toBe(1);
           const observed = await app.quoteBackingBuy(
             deploy.tokenId.toString("hex"),
-            1000000n * 100000000n,
+            1_000_000n * 100_000_000n,
           );
           const legacy = await follow.followPendingBacking(
             deploy.tokenId.toString("hex"),
@@ -402,7 +402,7 @@ describe.skipIf(!isolated)(
                 txid: deployTxid,
                 vout: 1,
                 script: deploy.vault.scriptPubKey,
-                valueSats: 10000n,
+                valueSats: 10_000n,
               },
             },
           );
@@ -438,7 +438,7 @@ describe.skipIf(!isolated)(
                     txid: deployTxid,
                     vout: 1,
                     script: deploy.vault.scriptPubKey,
-                    valueSats: 10000n,
+                    valueSats: 10_000n,
                   },
                 },
               )
@@ -458,13 +458,80 @@ describe.skipIf(!isolated)(
             (
               await noRpc.quoteBackingBuy(
                 deploy.tokenId.toString("hex"),
-                1000000n * 100000000n,
+                1_000_000n * 100_000_000n,
               )
             ).stateHash,
           ).toBe(observed.stateHash);
+          await saveWalletFundingSnapshot(
+            db,
+            "regtest",
+            payment.output!.toString("hex"),
+            funding.map((coin) => ({
+              txid: coin.txid,
+              vout: coin.vout,
+              valueSats: coin.valueSats.toString(),
+              confirmations: 1,
+            })),
+          );
+          await saveFeeObservation(
+            db,
+            "regtest",
+            {
+              floorSatPerVb: 1n,
+              ceilingSatPerVb: 100n,
+              estimated: false,
+              tiers: [
+                { key: "standard", label: "Standard", blocks: 6, satPerVb: 1n },
+              ],
+            },
+            new Date(),
+          );
+          const built = await noRpc.buildBackingBuy({
+            tokenId: deploy.tokenId.toString("hex"),
+            amountAtoms: observed.amountAtoms,
+            quoteBinding: {
+              stateHash: observed.stateHash,
+              backingOutpoint: observed.backingOutpoint,
+              expiresAtHeight: null,
+            },
+            walletScript: payment.output!.toString("hex"),
+            walletPublicKey: publicKey.toString("hex"),
+            ordinalsScript: walletWitness.output!.toString("hex"),
+            ordinalsPublicKey: publicKey.toString("hex"),
+            walletAddress: null,
+            funding: [{ txid: funding[0]!.txid, vout: funding[0]!.vout }],
+            minerFeeSats: 1000n,
+            idempotencyKey: randomUUID(),
+          });
+          const builtPsbt = bitcoin.Psbt.fromBase64(built.psbtBase64);
+          expect(
+            builtPsbt.data.inputs.every(
+              (input) =>
+                !input.tapScriptSig?.length && !input.partialSig?.length,
+            ),
+          ).toBe(true);
+          expect(built.sessionId).toBeTruthy();
+          if (!cachedSubmitChecked) {
+            builtPsbt.signInput(1, wallet);
+            await expect(
+              app.submitBackingBuy({
+                sessionId: built.sessionId,
+                signedPsbtBase64: builtPsbt.toBase64(),
+              }),
+            ).rejects.toThrow(/FUNDING_UNCONFIRMED/);
+            expect(
+              await provider.getTxout(funding[0]!.txid, funding[0]!.vout),
+            ).toBeNull();
+            cachedSubmitChecked = true;
+          }
+
+          await db.execute(sql`update cove_pending_backing set observed_at = clock_timestamp() - interval '1 hour',
+          observed_revision = null where network = ${config.network}`);
+          await db.execute(sql`update cove_v3_runtime set core_reachable = false,
+          chain_observed_at = clock_timestamp() - interval '1 hour' where network = ${config.network}`);
           const routeQuote = await noRpc.quoteBackingBuy(
             deploy.tokenId.toString("hex"),
-            1000000n * 100000000n,
+            1_000_000n * 100_000_000n,
           );
           const routes = await noRpc.getBuyRoutes(
             deploy.tokenId.toString("hex"),
@@ -477,11 +544,11 @@ describe.skipIf(!isolated)(
               routeQuote.feeSats +
               routeQuote.creatorFeeSats,
           );
-          await noRpc.quoteBuyForSats(deploy.tokenId.toString("hex"), 100000n);
+          await noRpc.quoteBuyForSats(deploy.tokenId.toString("hex"), 100_000n);
           if (legacy.state.issuedPublicSupplyAtoms > 0n)
             await noRpc.quoteRedeem(
               deploy.tokenId.toString("hex"),
-              1000000n * 100000000n,
+              1_000_000n * 100_000_000n,
             );
           expect((await noRpc.txStatus("aa".repeat(32))).state).toBe("unknown");
           const fallbackProvider = new Proxy(provider, {
@@ -503,7 +570,7 @@ describe.skipIf(!isolated)(
             (
               await noRpc.quoteBackingBuy(
                 deploy.tokenId.toString("hex"),
-                1000000n * 100000000n,
+                1_000_000n * 100_000_000n,
               )
             ).stateHash,
           ).toBe(observed.stateHash);
@@ -556,7 +623,7 @@ describe.skipIf(!isolated)(
           });
         fundingReplacement.addOutput({
           script: payment.output!,
-          value: 9900000,
+          value: 9_900_000,
         });
         fundingReplacement.signInput(0, wallet);
         fundingReplacement.finalizeInput(0);
@@ -602,7 +669,7 @@ describe.skipIf(!isolated)(
               txid: deployTxid,
               vout: 1,
               script: deploy.vault.scriptPubKey,
-              valueSats: 10000n,
+              valueSats: 10_000n,
             },
           },
         );
@@ -661,9 +728,10 @@ describe.skipIf(!isolated)(
             (job) => job.id === readyA.id,
           ),
         ).toBe(true);
-        const otherBlock = await rpc<{
-          hash: string;
-        }>("generateblock", [minerAddress, [aTx.toHex()]]);
+        const otherBlock = await rpc<{ hash: string }>("generateblock", [
+          minerAddress,
+          [aTx.toHex()],
+        ]);
         await index(otherBlock.hash);
         expect(await indexedBackingConflict(db, "regtest", aTx.getId())).toBe(
           false,
@@ -682,7 +750,7 @@ describe.skipIf(!isolated)(
           true,
         );
       },
-      60000,
+      60_000,
     );
   },
 );
