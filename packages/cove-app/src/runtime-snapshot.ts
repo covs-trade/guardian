@@ -7,6 +7,7 @@ import {
 } from "@crclaunch/bitcoin";
 import { readStoredFeeObservation } from "@crclaunch/cove-market";
 import { AppError } from "./errors.js";
+
 export async function saveChainObservation(
   db: Database | DbTransaction,
   network: string,
@@ -24,6 +25,7 @@ export async function saveChainObservation(
     .values({ network, ...fields })
     .onConflictDoUpdate({ target: schema.coveV3Runtime.network, set: fields });
 }
+
 export async function saveFeeObservation(
   db: Database | DbTransaction,
   network: string,
@@ -47,19 +49,20 @@ export async function saveFeeObservation(
     .values({ network, ...fields })
     .onConflictDoUpdate({ target: schema.coveV3Runtime.network, set: fields });
 }
+
 export async function collectFeeObservation(
   provider: CoreRpcProvider,
-): Promise<{
-  rates: FeeRates;
-  observedAt: Date;
-}> {
+  network?: string,
+): Promise<{ rates: FeeRates; observedAt: Date }> {
   const startedAt = new Date();
-  const rates = await loadFeeRates(provider, {
-    signal: AbortSignal.timeout(20000),
-    retry: true,
-  });
+  const rates = await loadFeeRates(
+    provider,
+    { signal: AbortSignal.timeout(20_000), retry: true },
+    network === "signet" ? "relay-floor-fallback" : "node",
+  );
   return { rates, observedAt: startedAt };
 }
+
 export async function readFeeObservation(
   db: Database,
   network: string,
