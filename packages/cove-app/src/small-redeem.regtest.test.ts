@@ -231,7 +231,10 @@ describe.skipIf(!isolated)("1000-token redemptions on isolated Core", () => {
         return input;
       }
       await index(deployBlocks[0]!);
-      async function confirmedTransaction(txid: string) {
+      async function confirmedTransaction(
+        txid: string,
+        expectedMinerFeeSats = 1000n,
+      ) {
         const transaction = bitcoin.Transaction.fromHex(
           await rpc<string>("getrawtransaction", [txid]),
         );
@@ -251,7 +254,9 @@ describe.skipIf(!isolated)("1000-token redemptions on isolated Core", () => {
         const owned = (output: (typeof transaction.outs)[number]) =>
           output.script.equals(payment.output!) ||
           output.script.equals(ordinals.output!);
-        expect(sum(previousOutputs) - sum(transaction.outs)).toBe(1000n);
+        expect(sum(previousOutputs) - sum(transaction.outs)).toBe(
+          expectedMinerFeeSats,
+        );
         return {
           transaction,
           walletDelta:
@@ -356,7 +361,8 @@ describe.skipIf(!isolated)("1000-token redemptions on isolated Core", () => {
       let issuedAtoms = 0n,
         platformBalance = 0n,
         creatorBalance = 0n,
-        walletDelta = 0n;
+        walletDelta = 0n,
+        totalMinerFees = 0n;
       const buyTxids: string[] = [],
         sellTxids: string[] = [];
       function checkBacking() {
@@ -436,6 +442,7 @@ describe.skipIf(!isolated)("1000-token redemptions on isolated Core", () => {
         platformBalance += platformBuyFee;
         creatorBalance += creatorBuyFee;
         walletDelta += boughtTransaction.walletDelta;
+        totalMinerFees += 1000n;
         buyTxids.push(bought.txid);
         checkBacking();
         await checkRecipients();
@@ -480,16 +487,21 @@ describe.skipIf(!isolated)("1000-token redemptions on isolated Core", () => {
                   },
                 ]
               : [],
-          minerFeeSats: 1000n,
+          ...(fragmented ? { feeRateSatPerVb: 6n } : { minerFeeSats: 1000n }),
           idempotencyKey: randomUUID(),
         });
+        const saleMinerFee = sale.intent.minerFeeSats;
+        expect(saleMinerFee).toBeLessThan(20_000n);
+        if (fragmented) expect(saleMinerFee).toBeGreaterThan(1000n);
         const salePsbt = bitcoin.Psbt.fromBase64(sale.psbtBase64);
         expect(salePsbt.txOutputs[2]!.script.equals(payment.output!)).toBe(
           true,
         );
         expect(salePsbt.txOutputs[2]!.value).toBeGreaterThan(540);
         expect(sale.intent.netSats).toBe(sellQuote.netSats);
-        expect(sale.intent.walletDeltaSats).toBe(sellQuote.netSats - 1000n);
+        expect(sale.intent.walletDeltaSats).toBe(
+          sellQuote.netSats - saleMinerFee,
+        );
         expect(sale.intent.payoutSats !== undefined).toBe(
           redeemTokens === 1000n,
         );
@@ -525,15 +537,19 @@ describe.skipIf(!isolated)("1000-token redemptions on isolated Core", () => {
           valid: true,
           operation: "REDEEM",
         });
-        const soldTransaction = await confirmedTransaction(sold.txid);
+        const soldTransaction = await confirmedTransaction(
+          sold.txid,
+          saleMinerFee,
+        );
         expect(soldTransaction.paidTo(feeScript)).toBe(1000n);
         expect(soldTransaction.paidTo(creatorScript)).toBe(0n);
         expect(soldTransaction.walletDelta).toBe(
-          sellQuote.grossSats - 1000n - 1000n,
+          sellQuote.grossSats - 1000n - saleMinerFee,
         );
         issuedAtoms -= sellAmount;
         platformBalance += 1000n;
         walletDelta += soldTransaction.walletDelta;
+        totalMinerFees += saleMinerFee;
         sellTxids.push(sold.txid);
         checkBacking();
         await checkRecipients();
@@ -541,9 +557,7 @@ describe.skipIf(!isolated)("1000-token redemptions on isolated Core", () => {
       if (!partial) {
         expect(issuedAtoms).toBe(0n);
         expect(walletDelta).toBe(
-          -platformBalance -
-            creatorBalance -
-            BigInt(rounds + sellAmounts.length) * 1000n,
+          -platformBalance - creatorBalance - totalMinerFees,
         );
       }
       const undo = state.undoByHeight.get(redeemedBlock.height)!;
