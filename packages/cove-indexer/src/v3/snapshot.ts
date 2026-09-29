@@ -1,4 +1,4 @@
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, inArray, sql } from "drizzle-orm";
 import { schema, type Database } from "@crclaunch/db";
 import type {
   CoveCanonicalView,
@@ -52,6 +52,13 @@ export async function loadCanonicalViewSnapshotFromDb(params: {
             eq(schema.coveV3TokenUtxos.tokenId, snapshotTokenId),
             eq(schema.coveV3TokenUtxos.canonical, true),
             isNull(schema.coveV3TokenUtxos.spentByTxid),
+            params.relevantOutpoints === undefined
+              ? undefined
+              : relevantOutpoints.length
+                ? inArray(schema.coveV3TokenUtxos.txid, [
+                    ...new Set(relevantOutpoints.map((o) => o.txid)),
+                  ])
+                : sql`false`,
           ),
         );
       const token = await tx

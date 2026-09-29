@@ -346,11 +346,30 @@ export class CoreRpcProvider implements BitcoinChainProvider {
     this.rawTransactionPending.set(txid, read);
     return read;
   }
-  async getMempoolSpender(
-    txid: string,
-    vout: number,
+  async getMempoolSnapshot(options: RpcReadOptions = {}): Promise<Set<string>> {
+    const ids = await this.call<unknown>("getrawmempool", [false], options);
+    if (
+      !Array.isArray(ids) ||
+      ids.length > 100000 ||
+      ids.some((id) => typeof id !== "string" || !/^[0-9a-f]{64}$/i.test(id))
+    ) {
+      throw new RpcError(
+        "getrawmempool",
+        "response",
+        "invalid mempool snapshot",
+      );
+    }
+    return new Set(ids.map((id: string) => id.toLowerCase()));
+  }
+  async getMempoolSpenders(
+    outpoints: {
+      txid: string;
+      vout: number;
+    }[],
     options: RpcReadOptions = {},
-  ): Promise<string | null | undefined> {
+  ): Promise<Map<string, string | null> | undefined> {
+    if (outpoints.length > 2000) throw new Error("too many mempool outpoints");
+    if (!outpoints.length) return new Map();
     let rows: {
       txid?: string;
       vout?: number;
@@ -359,7 +378,7 @@ export class CoreRpcProvider implements BitcoinChainProvider {
     try {
       rows = await this.call(
         "gettxspendingprevout",
-        [[{ txid, vout }]],
+        [outpoints.map(({ txid, vout }) => ({ txid, vout }))],
         options,
       );
     } catch (error) {
@@ -373,11 +392,14 @@ export class CoreRpcProvider implements BitcoinChainProvider {
     }
     if (
       !Array.isArray(rows) ||
-      rows.length !== 1 ||
-      rows[0]?.txid !== txid ||
-      rows[0]?.vout !== vout ||
-      (rows[0]?.spendingtxid !== undefined &&
-        !/^[0-9a-f]{64}$/i.test(rows[0].spendingtxid))
+      rows.length !== outpoints.length ||
+      rows.some(
+        (row, i) =>
+          row?.txid !== outpoints[i]!.txid ||
+          row?.vout !== outpoints[i]!.vout ||
+          (row?.spendingtxid !== undefined &&
+            !/^[0-9a-f]{64}$/i.test(row.spendingtxid)),
+      )
     ) {
       throw new RpcError(
         "gettxspendingprevout",
@@ -385,7 +407,21 @@ export class CoreRpcProvider implements BitcoinChainProvider {
         "invalid mempool spender response",
       );
     }
-    return rows[0]!.spendingtxid?.toLowerCase() ?? null;
+    return new Map(
+      rows.map((row) => [
+        `${row.txid}:${row.vout}`,
+        row.spendingtxid?.toLowerCase() ?? null,
+      ]),
+    );
+  }
+  async getMempoolSpender(
+    txid: string,
+    vout: number,
+    options: RpcReadOptions = {},
+  ): Promise<string | null | undefined> {
+    return (await this.getMempoolSpenders([{ txid, vout }], options))?.get(
+      `${txid}:${vout}`,
+    );
   }
   async isTransactionInMempool(
     txid: string,

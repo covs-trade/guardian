@@ -123,7 +123,9 @@ describe("RPC evidence", () => {
       await expect(
         new CoreRpcProvider({ url: "https://example.com" }).observeTransaction(
           txid,
-          { retry: false },
+          {
+            retry: false,
+          },
         ),
       ).rejects.toBeInstanceOf(RpcError);
       expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -293,7 +295,9 @@ describe("CoreRpcProvider authentication", () => {
             request.signal?.addEventListener(
               "abort",
               () => reject(request.signal?.reason),
-              { once: true },
+              {
+                once: true,
+              },
             );
           }),
       ),
@@ -360,16 +364,14 @@ describe("competing transaction observations", () => {
     async (spendingtxid) => {
       vi.stubGlobal(
         "fetch",
-        vi
-          .fn()
-          .mockResolvedValue(
-            Response.json({
-              result: [
-                { txid, vout: 1, ...(spendingtxid ? { spendingtxid } : {}) },
-              ],
-              error: null,
-            }),
-          ),
+        vi.fn().mockResolvedValue(
+          Response.json({
+            result: [
+              { txid, vout: 1, ...(spendingtxid ? { spendingtxid } : {}) },
+            ],
+            error: null,
+          }),
+        ),
       );
       expect(
         await new CoreRpcProvider({
@@ -480,5 +482,70 @@ describe("RPC attempt budgeting", () => {
     });
     await expect(provider.getBestHeight()).rejects.toBe(error);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+describe("bounded batch mempool observations", () => {
+  const a = "aa".repeat(32),
+    b = "bb".repeat(32);
+  it("fetches one membership snapshot and one ordered spender batch", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(async () => Response.json({ result: [a, b] }))
+      .mockImplementationOnce(async () =>
+        Response.json({
+          result: [
+            { txid: a, vout: 1, spendingtxid: b },
+            { txid: b, vout: 1 },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const provider = new CoreRpcProvider({ url: "https://example.com" });
+    expect(await provider.getMempoolSnapshot()).toEqual(new Set([a, b]));
+    expect(
+      await provider.getMempoolSpenders([
+        { txid: a, vout: 1 },
+        { txid: b, vout: 1 },
+      ]),
+    ).toEqual(
+      new Map([
+        [`${a}:1`, b],
+        [`${b}:1`, null],
+      ]),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it.each([{}, ["bad"], [null]])(
+    "rejects malformed membership without inventing absence: %j",
+    async (result) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => Response.json({ result })),
+      );
+      await expect(
+        new CoreRpcProvider({
+          url: "https://example.com",
+        }).getMempoolSnapshot(),
+      ).rejects.toBeInstanceOf(RpcError);
+    },
+  );
+  it("rejects partial or reordered spender replies", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          result: [
+            { txid: b, vout: 1 },
+            { txid: a, vout: 1 },
+          ],
+        }),
+      ),
+    );
+    await expect(
+      new CoreRpcProvider({ url: "https://example.com" }).getMempoolSpenders([
+        { txid: a, vout: 1 },
+        { txid: b, vout: 1 },
+      ]),
+    ).rejects.toBeInstanceOf(RpcError);
   });
 });

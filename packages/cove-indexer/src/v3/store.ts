@@ -1,5 +1,10 @@
-import { schema, type DbTransaction } from "@crclaunch/db";
-import { eq, and } from "drizzle-orm";
+import {
+  schema,
+  assertObservationWorker,
+  type DbTransaction,
+} from "@crclaunch/db";
+import * as bitcoin from "bitcoinjs-lib";
+import { eq, and, sql } from "drizzle-orm";
 import type { V3IndexerState } from "./state.js";
 import type {
   BlockUndo,
@@ -11,7 +16,10 @@ import type {
 import { encodeUndo } from "./undo.js";
 const tables = schema;
 export class V3Store {
-  constructor(readonly network: string) {}
+  constructor(
+    readonly network: string,
+    private readonly workerEpoch?: string,
+  ) {}
   async persistBlock(
     tx: DbTransaction,
     state: V3IndexerState,
@@ -23,6 +31,24 @@ export class V3Store {
     } = { rebuilding: false },
   ): Promise<void> {
     const n = this.network;
+    if (this.workerEpoch)
+      await assertObservationWorker(tx, n, this.workerEpoch);
+    const inputs = block.txs.flatMap((hex) => {
+      const parsed = bitcoin.Transaction.fromHex(hex);
+      return parsed.ins
+        .filter((i) => i.index !== 0xffffffff)
+        .map((i) => ({
+          txid: Buffer.from(i.hash).reverse().toString("hex"),
+          vout: i.index,
+          spender: parsed.getId(),
+        }));
+    });
+    await tx.execute(sql`insert into cove_indexed_spends (network, txid, vout, spender_txid, block_hash, block_height)
+      select distinct ${n}, j.txid, j.vout, j.spender, ${block.hash}, ${block.height}::bigint
+      from jsonb_to_recordset(${JSON.stringify(inputs)}::jsonb) j(txid text, vout integer, spender text)
+      where exists (select 1 from cove_watched_inputs w where w.network = ${n} and w.txid = j.txid and w.vout = j.vout)
+        or exists (select 1 from cove_v3_backing_states b where b.network = ${n} and b.txid = j.txid and b.vout = j.vout and b.canonical)
+      on conflict do nothing`);
     await tx.insert(tables.coveV3Blocks).values({
       network: n,
       height: block.height,
@@ -203,6 +229,11 @@ export class V3Store {
     newCursor: V3Cursor,
   ): Promise<void> {
     const n = this.network;
+    if (this.workerEpoch)
+      await assertObservationWorker(tx, n, this.workerEpoch);
+    await tx.execute(
+      sql`delete from cove_indexed_spends where network = ${n} and block_hash = ${undo.blockHash}`,
+    );
     for (const op of [...undo.ops].reverse()) {
       switch (op.kind) {
         case "DEPLOY":

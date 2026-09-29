@@ -24,3 +24,5 @@ export {
 export * from "./repo.js";
 export * from "./deployment-metadata.js";
 export * from "./quotas.js";
+
+export * from "./observations.js";

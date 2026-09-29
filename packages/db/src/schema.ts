@@ -6,6 +6,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -577,6 +578,7 @@ export const coveV3Runtime = pgTable("cove_v3_runtime", {
       satPerVb: string;
     }[];
   }>(),
+  pendingObservedAt: timestamp("pending_observed_at", { withTimezone: true }),
   feesObservedAt: timestamp("fees_observed_at", { withTimezone: true }),
 });
 export const coveV3Tokens = pgTable(
@@ -1122,6 +1124,8 @@ export const coveV3Submissions = pgTable(
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    conflictGeneration: bigint("conflict_generation", { mode: "bigint" }),
+    conflicted: boolean("conflicted").notNull().default(false),
     attempts: integer("attempts").notNull().default(0),
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -1192,3 +1196,86 @@ export const coveRpcBudgets = pgTable("cove_rpc_budgets", {
     .notNull()
     .default({ rate: 3, concurrency: 6, next: 0, lanes: {}, leases: [] }),
 });
+export const coveObservationEpochs = pgTable("cove_observation_epochs", {
+  network: text("network").primaryKey(),
+  chainGeneration: atoms("chain_generation").notNull().default(0n),
+  tradeRevision: atoms("trade_revision").notNull().default(0n),
+  pendingRevision: atoms("pending_revision").notNull().default(0n),
+  marketRevision: atoms("market_revision").notNull().default(0n),
+  metadataRevision: atoms("metadata_revision").notNull().default(0n),
+  workerEpoch: uuid("worker_epoch"),
+});
+export const covePendingBacking = pgTable(
+  "cove_pending_backing",
+  {
+    network: text("network").notNull(),
+    tokenId: text("token_id").notNull(),
+    requestedRevision: atoms("requested_revision").notNull().default(0n),
+    observedRevision: atoms("observed_revision"),
+    chainGeneration: atoms("chain_generation"),
+    baseTxid: text("base_txid"),
+    baseVout: integer("base_vout"),
+    payload: jsonb("payload"),
+    observedAt: timestamp("observed_at", { withTimezone: true }),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true })
+      .notNull()
+      .default(new Date(0)),
+  },
+  (t) => [
+    primaryKey({ columns: [t.network, t.tokenId] }),
+    index("cove_pending_backing_refresh_idx").on(
+      t.network,
+      t.lastCheckedAt,
+      t.tokenId,
+    ),
+  ],
+);
+export const coveTransactionObservations = pgTable(
+  "cove_transaction_observations",
+  {
+    network: text("network").notNull(),
+    txid: text("txid").notNull(),
+    chainGeneration: atoms("chain_generation").notNull(),
+    state: text("state").notNull(),
+    blockHash: text("block_hash"),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.network, t.txid] })],
+);
+export const coveWatchedInputs = pgTable(
+  "cove_watched_inputs",
+  {
+    network: text("network").notNull(),
+    sourceId: text("source_id").notNull(),
+    txid: text("txid").notNull(),
+    vout: integer("vout").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.network, t.sourceId, t.txid, t.vout] }),
+    index("cove_watched_inputs_outpoint_idx").on(t.network, t.txid, t.vout),
+  ],
+);
+export const coveIndexedSpends = pgTable(
+  "cove_indexed_spends",
+  {
+    network: text("network").notNull(),
+    txid: text("txid").notNull(),
+    vout: integer("vout").notNull(),
+    spenderTxid: text("spender_txid").notNull(),
+    blockHash: text("block_hash").notNull(),
+    blockHeight: atoms("block_height").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.network, t.txid, t.vout, t.blockHash] })],
+);
+export const coveBackingProofs = pgTable(
+  "cove_backing_proofs",
+  {
+    network: text("network").notNull(),
+    tokenId: text("token_id").notNull(),
+    txid: text("txid").notNull(),
+    vout: integer("vout").notNull(),
+    blockHash: text("block_hash").notNull(),
+    blockHeight: atoms("block_height").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.network, t.tokenId] })],
+);

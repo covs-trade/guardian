@@ -109,6 +109,106 @@ export async function verifyPendingBackingView(
     ancestors.push(tx);
     cursor = prevout(tx.ins[0]);
   }
+  const finalView = await replayPendingBackingAncestry(
+    params,
+    ancestors.reverse(),
+  );
+  state = finalView.getCurrentBackingState(params.tokenId)!;
+  const targetVault = buildBackingVaultV3({
+    state,
+    guardianXOnly: params.guardianXOnly,
+    recoveryKeyXOnly: params.recoveryKeyXOnly,
+    recoveryProfile: params.recoveryProfile,
+    network:
+      params.network === "mainnet"
+        ? bitcoin.networks.bitcoin
+        : params.network === "regtest"
+          ? bitcoin.networks.regtest
+          : bitcoin.networks.testnet,
+  });
+  const observedOutput =
+    key(params.target) === key(anchor)
+      ? base
+      : await params.provider.getTxout(params.target.txid, params.target.vout);
+  const output =
+    observedOutput ??
+    (ancestors.length
+      ? {
+          bestBlockHash: tip.bestBlockHash,
+          scriptPubKeyHex:
+            ancestors[ancestors.length - 1]!.outs[1]!.script.toString("hex"),
+          valueSats: BigInt(ancestors[ancestors.length - 1]!.outs[1]!.value),
+        }
+      : null);
+  if (
+    !output ||
+    output.bestBlockHash !== tip.bestBlockHash ||
+    output.scriptPubKeyHex !== targetVault.scriptPubKey.toString("hex") ||
+    output.valueSats !== RESERVE_ANCHOR_SATS + state.backingSats
+  ) {
+    throw new Error("PENDING_VAULT_UNAVAILABLE");
+  }
+  for (const input of params.requestedInputs ?? []) {
+    const token = finalView.getTokenUtxo(input);
+    if (!token) continue;
+    const pendingToken = ancestors.some((tx) => tx.getId() === input.txid)
+      ? token
+      : undefined;
+    const observedCarrier = await params.provider.getTxout(
+      input.txid,
+      input.vout,
+      pendingToken ? undefined : false,
+    );
+    const carrier =
+      observedCarrier ??
+      (pendingToken
+        ? {
+            bestBlockHash: tip.bestBlockHash,
+            scriptPubKeyHex: pendingToken.scriptPubKey.toString("hex"),
+            valueSats: TOKEN_CARRIER_SATS,
+          }
+        : null);
+    if (
+      !carrier ||
+      carrier.bestBlockHash !== tip.bestBlockHash ||
+      carrier.scriptPubKeyHex !== token.scriptPubKey.toString("hex") ||
+      carrier.valueSats !== TOKEN_CARRIER_SATS
+    ) {
+      throw new Error("PENDING_TOKEN_INPUT_UNAVAILABLE");
+    }
+  }
+  for (const tx of ancestors) {
+    if (
+      (
+        await params.provider.observeTransaction(tx.getId(), {
+          retry: false,
+          signal: AbortSignal.timeout(5000),
+        })
+      ).state !== "mempool"
+    ) {
+      throw new Error("PENDING_PARENT_UNAVAILABLE");
+    }
+  }
+  const latest = await params.provider.getBlockchainInfo();
+  if (
+    latest.bestBlockHash !== tip.bestBlockHash ||
+    latest.blocks !== tip.blocks
+  )
+    throw new Error("PENDING_CHAIN_CHANGED");
+  await params.assertCurrent();
+  return finalView;
+}
+export async function replayPendingBackingAncestry(
+  params: Omit<
+    PendingBackingParams,
+    "target" | "provider" | "requestedInputs" | "assertCurrent"
+  >,
+  transactions: readonly bitcoin.Transaction[],
+): Promise<CoveCanonicalView> {
+  const anchor = params.view.getBackingOutpoint(params.tokenId);
+  let state = params.view.getCurrentBackingState(params.tokenId);
+  if (!anchor || !state || transactions.length > MAX_PENDING_ANCESTORS)
+    throw new Error("PENDING_UNKNOWN_TOKEN");
   const tokens = new Map<string, TokenUtxo>();
   const spent = new Set<string>();
   let backing = anchor;
@@ -134,7 +234,7 @@ export async function verifyPendingBackingView(
         params.view.getTokenCreatorScript?.(id) ?? null,
     };
   };
-  for (const tx of ancestors.reverse()) {
+  for (const tx of transactions) {
     const wire = decodeCoveOpReturnTx(tx);
     if (wire.op !== OP_MINT && wire.op !== OP_REDEEM)
       throw new Error("PENDING_WRONG_OPERATION");
@@ -236,86 +336,5 @@ export async function verifyPendingBackingView(
     state = next;
     backing = { txid: tx.getId(), vout: 1 };
   }
-  const targetVault = buildBackingVaultV3({
-    state,
-    guardianXOnly: params.guardianXOnly,
-    recoveryKeyXOnly: params.recoveryKeyXOnly,
-    recoveryProfile: params.recoveryProfile,
-    network:
-      params.network === "mainnet"
-        ? bitcoin.networks.bitcoin
-        : params.network === "regtest"
-          ? bitcoin.networks.regtest
-          : bitcoin.networks.testnet,
-  });
-  const observedOutput =
-    key(params.target) === key(anchor)
-      ? base
-      : await params.provider.getTxout(params.target.txid, params.target.vout);
-  const output =
-    observedOutput ??
-    (ancestors.length
-      ? {
-          bestBlockHash: tip.bestBlockHash,
-          scriptPubKeyHex:
-            ancestors[ancestors.length - 1]!.outs[1]!.script.toString("hex"),
-          valueSats: BigInt(ancestors[ancestors.length - 1]!.outs[1]!.value),
-        }
-      : null);
-  if (
-    !output ||
-    output.bestBlockHash !== tip.bestBlockHash ||
-    output.scriptPubKeyHex !== targetVault.scriptPubKey.toString("hex") ||
-    output.valueSats !== RESERVE_ANCHOR_SATS + state.backingSats
-  ) {
-    throw new Error("PENDING_VAULT_UNAVAILABLE");
-  }
-  const finalView = overlay();
-  for (const input of params.requestedInputs ?? []) {
-    const token = finalView.getTokenUtxo(input);
-    if (!token) continue;
-    const pendingToken = tokens.get(key(input));
-    const observedCarrier = await params.provider.getTxout(
-      input.txid,
-      input.vout,
-      pendingToken ? undefined : false,
-    );
-    const carrier =
-      observedCarrier ??
-      (pendingToken
-        ? {
-            bestBlockHash: tip.bestBlockHash,
-            scriptPubKeyHex: pendingToken.scriptPubKey.toString("hex"),
-            valueSats: TOKEN_CARRIER_SATS,
-          }
-        : null);
-    if (
-      !carrier ||
-      carrier.bestBlockHash !== tip.bestBlockHash ||
-      carrier.scriptPubKeyHex !== token.scriptPubKey.toString("hex") ||
-      carrier.valueSats !== TOKEN_CARRIER_SATS
-    ) {
-      throw new Error("PENDING_TOKEN_INPUT_UNAVAILABLE");
-    }
-  }
-  for (const tx of ancestors) {
-    if (
-      (
-        await params.provider.observeTransaction(tx.getId(), {
-          retry: false,
-          signal: AbortSignal.timeout(5000),
-        })
-      ).state !== "mempool"
-    ) {
-      throw new Error("PENDING_PARENT_UNAVAILABLE");
-    }
-  }
-  const latest = await params.provider.getBlockchainInfo();
-  if (
-    latest.bestBlockHash !== tip.bestBlockHash ||
-    latest.blocks !== tip.blocks
-  )
-    throw new Error("PENDING_CHAIN_CHANGED");
-  await params.assertCurrent();
-  return finalView;
+  return overlay();
 }
