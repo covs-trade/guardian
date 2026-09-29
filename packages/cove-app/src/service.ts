@@ -245,8 +245,6 @@ interface BackingRow {
   chainObservation?: BlockchainInfo;
 }
 
-const MAX_REDEEM_TOKEN_INPUTS = 4;
-
 const MAX_TRANSFER_TOKEN_INPUTS = 4;
 
 const DEFAULT_LISTING_BLOCKS = 1_008n;
@@ -1851,17 +1849,8 @@ export class V3AppService {
     let running = 0n;
     for (const u of sorted) {
       if (running >= params.amountAtoms) break;
-      if (selected.length >= MAX_REDEEM_TOKEN_INPUTS) break;
       selected.push(u);
       running += u.amountAtoms;
-    }
-    if (running < params.amountAtoms) {
-      throw new AppError(
-        "TOKEN_AMOUNT_INVALID",
-        `balance is spread across too many outputs: the ${MAX_REDEEM_TOKEN_INPUTS} largest hold ` +
-          `${running} atoms, short of ${params.amountAtoms}. Consolidate with a transfer to yourself, ` +
-          `or redeem a smaller amount.`,
-      );
     }
     await this.requireHealthy();
     const backing = await this.loadBacking(params.tokenId);
