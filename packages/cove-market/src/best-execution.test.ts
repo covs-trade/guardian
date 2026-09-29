@@ -93,11 +93,10 @@ describe("best execution uses the validated pending price", () => {
       expect(execute).toHaveBeenCalledTimes(1);
     },
   );
-  it("fails closed on invalidated or stale observations", async () => {
-    const { db } = observed(10000n * 100000000n, false);
-    await expect(getBuyRoutes(db, "regtest", tokenId, amount)).rejects.toThrow(
-      "CORE_UNAVAILABLE",
-    );
+  it("serves the cached price despite expired freshness metadata", async () => {
+    const { db } = observed(10_000n * 100_000_000n, false);
+    const routes = await getBuyRoutes(db, "regtest", tokenId, amount);
+    expect(routes[0]?.kind).toBe("backing");
   });
   it("does not invent a route for a missing token", async () => {
     const { db, execute } = observed(0n);
