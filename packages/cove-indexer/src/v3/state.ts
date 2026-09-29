@@ -19,6 +19,7 @@ import {
   type ParsedEnvelopeV2,
 } from "@crclaunch/cove-wire";
 import {
+  isValidRedeemPayout,
   COVE_FEE_CONFIG,
   CREATOR_RECORD_SATS,
   LAUNCH_FEE_SATS,
@@ -44,20 +45,25 @@ import type {
   V3TokenMeta,
   V3TokenUtxo,
 } from "./types.js";
+
 function outpointKey(txid: string, vout: number): string {
   return `${txid}:${vout}`;
 }
+
 function isStandardCarrier(script: Buffer): boolean {
   return isP2TR(script) || isP2WPKH(script);
 }
+
 type ApplyResult = {
   op: V3Event["operation"];
   valid: boolean;
   reason: string | null;
   tokenId: string | null;
   undo: UndoOp | null;
+
   curve?: V3CurveTrade | null;
 };
+
 export class V3IndexerState {
   readonly tokens = new Map<string, V3TokenMeta>();
   readonly backing = new Map<string, V3Backing>();
@@ -65,6 +71,7 @@ export class V3IndexerState {
   readonly events: V3Event[] = [];
   readonly undoByHeight = new Map<bigint, BlockUndo>();
   cursor: V3Cursor;
+
   constructor(readonly config: V3IndexerConfig) {
     this.cursor = {
       network: config.network,
@@ -73,6 +80,7 @@ export class V3IndexerState {
       stateRoot: this.stateRoot(),
     };
   }
+
   stateRoot(): string {
     return computeStateRoot({
       tokens: this.tokens,
@@ -80,6 +88,7 @@ export class V3IndexerState {
       tokenUtxos: this.tokenUtxos,
     });
   }
+
   clone(): V3IndexerState {
     const c = new V3IndexerState(this.config);
     for (const [k, v] of this.tokens) c.tokens.set(k, { ...v });
@@ -95,6 +104,7 @@ export class V3IndexerState {
     c.cursor = { ...this.cursor };
     return c;
   }
+
   adopt(other: V3IndexerState): void {
     this.tokens.clear();
     this.backing.clear();
@@ -113,6 +123,7 @@ export class V3IndexerState {
     for (const [k, v] of other.undoByHeight) this.undoByHeight.set(k, v);
     this.cursor = { ...other.cursor };
   }
+
   getBackingStateByOutpoint(o: OutPoint): CoveStateV2 | null {
     for (const b of this.backing.values()) {
       if (b.outpoint.txid === o.txid && b.outpoint.vout === o.vout)
@@ -140,9 +151,11 @@ export class V3IndexerState {
       scriptPubKey: Buffer.from(u.scriptPubKey, "hex"),
     };
   }
+
   private record(e: V3Event): void {
     this.events.push(e);
   }
+
   private bitcoinNetwork(): bitcoin.networks.Network {
     switch (this.config.network) {
       case "regtest":
@@ -153,6 +166,7 @@ export class V3IndexerState {
         return bitcoin.networks.testnet;
     }
   }
+
   applyBlock(block: V3BlockInput): V3Event[] {
     if (block.height < this.config.genesisHeight) return [];
     const ops: UndoOp[] = [];
@@ -166,12 +180,14 @@ export class V3IndexerState {
         if (burn) ops.push(burn);
         continue;
       }
+
       let op: V3Event["operation"] = null;
       let valid = false;
       let reason: string | null = null;
       let tokenId: string | null = null;
       let undo: UndoOp | null = null;
       let curve: V3CurveTrade | null = null;
+
       if (parsed.kind === "INVALID") {
         op = null;
         valid = false;
@@ -186,8 +202,10 @@ export class V3IndexerState {
         curve = r.curve ?? null;
         if (r.valid && undo) ops.push(undo);
       }
+
       const burn = this.burnUnaccountedInputs(txid, rawHex);
       if (burn) ops.push(burn);
+
       const event: V3Event = {
         txid,
         blockHeight: block.height,
@@ -202,6 +220,7 @@ export class V3IndexerState {
       events.push(event);
       this.record(event);
     }
+
     this.undoByHeight.set(block.height, {
       height: block.height,
       blockHash: block.hash,
@@ -215,6 +234,7 @@ export class V3IndexerState {
     };
     return events;
   }
+
   private burnUnaccountedInputs(txid: string, rawHex: string): UndoOp | null {
     const spentUtxos: V3TokenUtxo[] = [];
     for (const input of bitcoin.Transaction.fromHex(rawHex).ins) {
@@ -231,6 +251,7 @@ export class V3IndexerState {
       ? { kind: "BURN", spendingTxid: txid, spentUtxos }
       : null;
   }
+
   undoBlock(height: bigint): void {
     const undo = this.undoByHeight.get(height);
     if (!undo) throw new Error(`no undo journal for height ${height}`);
@@ -270,6 +291,7 @@ export class V3IndexerState {
         }
       }
     }
+
     for (let i = this.events.length - 1; i >= 0; i--) {
       if (this.events[i]!.blockHeight === height) this.events.splice(i, 1);
     }
@@ -289,6 +311,7 @@ export class V3IndexerState {
           stateRoot: this.stateRoot(),
         };
   }
+
   private applyCove(
     txid: string,
     rawHex: string,
@@ -314,6 +337,7 @@ export class V3IndexerState {
         };
     }
   }
+
   private applyDeploy(
     txid: string,
     rawHex: string,
@@ -329,6 +353,7 @@ export class V3IndexerState {
         undo: null,
       };
     const tx = bitcoin.Transaction.fromHex(rawHex);
+
     const creatorOut = tx.outs[2];
     if (
       !creatorOut ||
@@ -343,6 +368,7 @@ export class V3IndexerState {
         undo: null,
       };
     }
+
     const launchFeeOut = tx.outs[3];
     if (
       !launchFeeOut ||
@@ -432,6 +458,7 @@ export class V3IndexerState {
       undo: { kind: "DEPLOY", tokenId: tokenIdHex },
     };
   }
+
   private applyMint(
     txid: string,
     rawHex: string,
@@ -587,6 +614,7 @@ export class V3IndexerState {
         undo: null,
       };
     }
+
     const priorBacking = backing;
     const nextBacking: V3Backing = {
       tokenId: tokenIdHex,
@@ -625,14 +653,11 @@ export class V3IndexerState {
       },
     };
   }
+
   private resolveTokenInputs(
     tx: bitcoin.Transaction,
     tokenIdHex: string,
-  ): {
-    utxos: V3TokenUtxo[];
-    ok: boolean;
-    reason: string;
-  } {
+  ): { utxos: V3TokenUtxo[]; ok: boolean; reason: string } {
     const spent: V3TokenUtxo[] = [];
     let saw = false;
     for (const ins of tx.ins) {
@@ -648,6 +673,7 @@ export class V3IndexerState {
     if (!saw) return { utxos: [], ok: false, reason: "FORGED_TOKEN_INPUT" };
     return { utxos: spent, ok: true, reason: "" };
   }
+
   private applyTransfer(
     txid: string,
     rawHex: string,
@@ -739,6 +765,7 @@ export class V3IndexerState {
       undo: { kind: "TRANSFER", spendingTxid: txid, spentUtxos, createdUtxos },
     };
   }
+
   private applyRedeem(
     txid: string,
     rawHex: string,
@@ -842,7 +869,6 @@ export class V3IndexerState {
       this.config.redeemFeeBps ?? COVE_FEE_CONFIG.redeemFeeBps,
       this.config.redeemFeeFlatSats ?? COVE_FEE_CONFIG.redeemFeeFlatSats,
     );
-    const netPayoutSats = grossSats - feeSats;
     const nextVault = buildBackingVaultV3({
       state: nextState,
       guardianXOnly: this.config.guardianXOnly,
@@ -873,7 +899,15 @@ export class V3IndexerState {
       };
     }
     const payout = tx.outs[2];
-    if (!payout || BigInt(payout.value) !== netPayoutSats) {
+    if (
+      !payout ||
+      !isValidRedeemPayout(
+        grossSats,
+        feeSats,
+        BigInt(payout.value),
+        payout.script,
+      )
+    ) {
       return {
         op: "REDEEM",
         valid: false,
@@ -943,6 +977,7 @@ export class V3IndexerState {
         undo: null,
       };
     }
+
     const priorBacking = backing;
     const nextBacking: V3Backing = {
       tokenId: tokenIdHex,

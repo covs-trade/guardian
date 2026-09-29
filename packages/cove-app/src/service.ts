@@ -74,7 +74,8 @@ import {
   creatorFeeSats,
   CREATOR_RECORD_SATS,
   LAUNCH_FEE_SATS,
-  checkRedeemPayout,
+  redeemWalletFundingTarget,
+  dustThreshold,
 } from "@crclaunch/cove-economics";
 import {
   ATOMS_PER_TOKEN,
@@ -226,6 +227,7 @@ export interface IntentV3 {
   creatorScript?: string;
   minerFeeSats: bigint;
   netSats: bigint | null;
+  payoutSats?: bigint;
 
   walletScript: string;
 
@@ -252,25 +254,6 @@ const DEFAULT_LISTING_BLOCKS = 1_008n;
 const MAX_PENDING_BACKING_CHAIN = 24;
 
 const BACKING_SUCCESSOR_VOUT = 1;
-
-function assertRedeemPayoutIsPayable(params: {
-  grossSats: bigint;
-  feeSats: bigint;
-  payoutScript: Buffer;
-}): void {
-  const check = checkRedeemPayout(
-    params.grossSats,
-    params.feeSats,
-    params.payoutScript,
-  );
-  if (check.isPayable) return;
-  throw new AppError(
-    "ECONOMIC_DUST",
-    `this sale is worth ${check.grossSats} sats and the exit fee is ${check.feeSats} sats, ` +
-      `so it would pay out ${check.netSats} sats. A sale has to be worth at least ` +
-      `${check.minimumGrossSats} sats to be worth making. Sell a larger amount.`,
-  );
-}
 
 export class V3AppService {
   readonly market: MarketService;
@@ -1783,11 +1766,11 @@ export class V3AppService {
     tokenId: string,
     amountAtoms: bigint,
   ): Promise<RedeemQuote> {
-    if (amountAtoms <= 0n || amountAtoms % ATOMS_PER_TOKEN !== 0n)
-      throw new AppError(
-        "TOKEN_AMOUNT_INVALID",
-        "redeem requires whole display tokens",
-      );
+    this.validateTokenAmount(
+      tokenId,
+      amountAtoms,
+      LOT_TOKENS * ATOMS_PER_TOKEN,
+    );
     const backing = await this.loadQuoteBacking(tokenId);
     const gross = grossRedeem(
       backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
@@ -1798,12 +1781,6 @@ export class V3AppService {
       this.config.redeemFeeBps,
       this.config.redeemFeeFlatSats,
     );
-
-    assertRedeemPayoutIsPayable({
-      grossSats: gross,
-      feeSats: fee,
-      payoutScript: this.config.feeScript,
-    });
     const next = applyRedeemV2(backing.state, amountAtoms).nextState;
     return {
       tokenId,
@@ -1900,23 +1877,17 @@ export class V3AppService {
       (s, u) => s + u.amountAtoms,
       0n,
     );
-
-    assertRedeemPayoutIsPayable({
-      grossSats: grossRedeem(
-        backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
-        params.amountAtoms / ATOMS_PER_TOKEN,
-      ),
-
-      feeSats: redeemFeeSats(
-        grossRedeem(
-          backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
-          params.amountAtoms / ATOMS_PER_TOKEN,
-        ),
-        this.config.redeemFeeBps,
-        this.config.redeemFeeFlatSats,
-      ),
-      payoutScript: wallet.payments.scriptBuffer,
-    });
+    const grossSats = grossRedeem(
+      backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
+      params.amountAtoms / ATOMS_PER_TOKEN,
+    );
+    const protocolFeeSats = redeemFeeSats(
+      grossSats,
+      this.config.redeemFeeBps,
+      this.config.redeemFeeFlatSats,
+    );
+    const walletFundedFees =
+      grossSats - protocolFeeSats < dustThreshold(wallet.payments.scriptBuffer);
     const changeCarrierSats =
       tokenInputTotalAtoms > params.amountAtoms ? TOKEN_CARRIER_SATS : 0n;
     const carrierSatsIn = BigInt(tokenInputs.length) * TOKEN_CARRIER_SATS;
@@ -1925,7 +1896,15 @@ export class V3AppService {
         op: "REDEEM",
         wallet,
         candidates: params.funding ?? [],
-        targetSats: changeCarrierSats - carrierSatsIn,
+        targetSats: walletFundedFees
+          ? redeemWalletFundingTarget(
+              grossSats,
+              protocolFeeSats,
+              wallet.payments.scriptBuffer,
+              carrierSatsIn,
+              changeCarrierSats,
+            )
+          : changeCarrierSats - carrierSatsIn,
         tokenInputs: tokenInputs.length,
         feeRateSatPerVb: params.feeRateSatPerVb,
         explicitMinerFeeSats: params.minerFeeSats,
@@ -1946,6 +1925,7 @@ export class V3AppService {
       sellerChangeScript: wallet.ordinals.scriptBuffer,
       feeScript: this.config.feeScript,
       minerFeeSats,
+      walletFundedFees,
       funderInputs,
       funderChangeScript: wallet.payments.scriptBuffer,
       redeemFeeBps: this.config.redeemFeeBps,
@@ -2009,6 +1989,7 @@ export class V3AppService {
         protocolFeeSats: result.redeemFeeSats,
         minerFeeSats: result.minerFeeSats,
         netSats: result.netSats,
+        payoutSats: walletFundedFees ? result.payoutSats : undefined,
         walletScript: wallet.payments.script,
         ordinalsScript: wallet.ordinals.script,
         stateHash: backing.stateHash,

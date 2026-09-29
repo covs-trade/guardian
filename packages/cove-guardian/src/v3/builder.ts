@@ -35,18 +35,17 @@ import {
   COVE_FEE_CONFIG,
 } from "@crclaunch/cove-economics";
 import type { Sats } from "@crclaunch/curve";
+
 bitcoin.initEccLib(ecc as unknown as Parameters<typeof bitcoin.initEccLib>[0]);
-export const RESERVE_ANCHOR_SATS = 10000n;
+
+export const RESERVE_ANCHOR_SATS = 10_000n;
+
 function addChangeOrAbsorb(
   psbt: bitcoin.Psbt,
   changeScript: Buffer,
   changeSats: Sats,
   minerFeeSats: Sats,
-): {
-  minerFeeSats: Sats;
-  changeSats: Sats;
-  absorbedSats: Sats;
-} {
+): { minerFeeSats: Sats; changeSats: Sats; absorbedSats: Sats } {
   if (changeSats <= 0n)
     return { minerFeeSats, changeSats: 0n, absorbedSats: 0n };
   if (changeSats >= dustThreshold(changeScript)) {
@@ -59,30 +58,38 @@ function addChangeOrAbsorb(
     absorbedSats: changeSats,
   };
 }
+
 export interface ResolvedInput {
   txid: string;
   vout: number;
   script: Buffer;
   valueSats: Sats;
+
   publicKey?: Buffer;
 }
+
 export interface DeployResult {
   psbt: bitcoin.Psbt;
   tokenId: Buffer;
   s0: CoveStateV2;
   vault: CoveVaultV3;
   wire: Buffer;
+
   minerFeeSats: Sats;
 }
+
 export function buildDeployPsbtV3(params: {
   network: bitcoin.networks.Network;
+
   identity: Omit<TokenIdentityInput, "creatorScript">;
   guardianXOnly: Buffer;
   recoveryKeyXOnly: Buffer;
   recoveryProfile?: VaultRecoveryProfile;
   deployerInputs: ResolvedInput[];
   deployerChangeScript: Buffer;
+
   creatorScript?: Buffer;
+
   feeScript: Buffer;
   minerFeeSats: Sats;
 }): DeployResult {
@@ -102,6 +109,7 @@ export function buildDeployPsbtV3(params: {
     ticker: params.identity.ticker,
     tokenNonce: params.identity.tokenNonce,
   });
+
   const psbt = new bitcoin.Psbt({ network: params.network });
   for (const input of params.deployerInputs) {
     psbt.addInput(psbtInputFor(input, params.network));
@@ -114,8 +122,11 @@ export function buildDeployPsbtV3(params: {
     script: vault.scriptPubKey,
     value: Number(RESERVE_ANCHOR_SATS),
   });
+
   psbt.addOutput({ script: creatorScript, value: Number(CREATOR_RECORD_SATS) });
+
   psbt.addOutput({ script: params.feeScript, value: Number(LAUNCH_FEE_SATS) });
+
   const totalIn = params.deployerInputs.reduce((s, i) => s + i.valueSats, 0n);
   const change =
     totalIn -
@@ -130,8 +141,10 @@ export function buildDeployPsbtV3(params: {
     change,
     params.minerFeeSats,
   );
+
   return { psbt, tokenId, s0, vault, wire, minerFeeSats: settled.minerFeeSats };
 }
+
 export interface MintResult {
   psbt: bitcoin.Psbt;
   prevVault: CoveVaultV3;
@@ -142,8 +155,10 @@ export interface MintResult {
   creatorFeeSats: Sats;
   wire: Buffer;
   stateInputIndex: number;
+
   minerFeeSats: Sats;
 }
+
 export function buildMintPsbtV3(params: {
   network: bitcoin.networks.Network;
   tokenId: Buffer;
@@ -157,14 +172,17 @@ export function buildMintPsbtV3(params: {
   buyerCarrierScript: Buffer;
   buyerChangeScript: Buffer;
   feeScript: Buffer;
+
   creatorScript: Buffer;
+
   creatorFeeBps?: bigint;
   minerFeeSats: Sats;
+
   buyFeeBps?: bigint;
+
   buyFeeFlatSats?: bigint;
-  discoveryEnvelope?: {
-    ticker: string;
-  };
+
+  discoveryEnvelope?: { ticker: string };
 }): MintResult {
   const { nextState, grossSats } = applyMintV2(
     params.prevState,
@@ -195,6 +213,7 @@ export function buildMintPsbtV3(params: {
     amount: params.mintAmountAtoms,
     recipientVout: 2,
   });
+
   const psbt = new bitcoin.Psbt({ network: params.network });
   psbt.addInput({
     hash: params.prevBacking.txid,
@@ -216,6 +235,7 @@ export function buildMintPsbtV3(params: {
   for (const input of params.buyerInputs) {
     psbt.addInput(psbtInputFor(input, params.network));
   }
+
   psbt.addOutput({
     script: Buffer.concat([Buffer.from([0x6a, wire.length]), wire]),
     value: 0,
@@ -234,6 +254,7 @@ export function buildMintPsbtV3(params: {
     params.creatorFeeBps ?? COVE_FEE_CONFIG.creatorFeeBps,
   );
   psbt.addOutput({ script: params.creatorScript, value: Number(creatorFee) });
+
   const totalIn =
     params.prevBacking.valueSats +
     params.buyerInputs.reduce((s, i) => s + i.valueSats, 0n);
@@ -251,6 +272,7 @@ export function buildMintPsbtV3(params: {
     change,
     params.minerFeeSats,
   );
+
   if (params.discoveryEnvelope) {
     const discovery = encodeDiscovery(
       decodeV2(wire),
@@ -261,6 +283,7 @@ export function buildMintPsbtV3(params: {
       value: 0,
     });
   }
+
   return {
     psbt,
     prevVault,
@@ -274,35 +297,31 @@ export function buildMintPsbtV3(params: {
     minerFeeSats: settled.minerFeeSats,
   };
 }
+
 export interface TransferResult {
   psbt: bitcoin.Psbt;
   wire: Buffer;
-  allocations: {
-    vout: number;
-    amount: bigint;
-  }[];
-  tokenOutputs: {
-    vout: number;
-    script: Buffer;
-    amountAtoms: bigint;
-  }[];
+
+  allocations: { vout: number; amount: bigint }[];
+
+  tokenOutputs: { vout: number; script: Buffer; amountAtoms: bigint }[];
+
   minerFeeSats: Sats;
 }
+
 export function buildTransferPsbtV2(params: {
   network: bitcoin.networks.Network;
   tokenId: Buffer;
   tokenInputs: ResolvedInput[];
+
   tokenInputTotalAtoms: bigint;
-  tokenOutputs: {
-    script: Buffer;
-    amountAtoms: bigint;
-  }[];
+
+  tokenOutputs: { script: Buffer; amountAtoms: bigint }[];
+
   funderInputs: ResolvedInput[];
   funderChangeScript: Buffer;
-  btcOutputs: {
-    script: Buffer;
-    valueSats: Sats;
-  }[];
+
+  btcOutputs: { script: Buffer; valueSats: Sats }[];
   minerFeeSats: Sats;
 }): TransferResult {
   if (params.tokenOutputs.length === 0) throw new Error("no token outputs");
@@ -315,6 +334,7 @@ export function buildTransferPsbtV2(params: {
     throw new Error(
       `token conservation violated: in=${params.tokenInputTotalAtoms} out=${tokenOutTotal}`,
     );
+
   let vout = 0;
   const wire = encodeTransferV2({
     tokenId: params.tokenId,
@@ -323,10 +343,12 @@ export function buildTransferPsbtV2(params: {
       amount: o.amountAtoms,
     })),
   });
+
   const psbt = new bitcoin.Psbt({ network: params.network });
   for (const input of [...params.tokenInputs, ...params.funderInputs]) {
     psbt.addInput(psbtInputFor(input, params.network));
   }
+
   psbt.addOutput({
     script: Buffer.concat([Buffer.from([0x6a, wire.length]), wire]),
     value: 0,
@@ -343,6 +365,7 @@ export function buildTransferPsbtV2(params: {
   for (const o of params.btcOutputs) {
     psbt.addOutput({ script: o.script, value: Number(o.valueSats) });
   }
+
   const totalIn = [...params.tokenInputs, ...params.funderInputs].reduce(
     (s, i) => s + i.valueSats,
     0n,
@@ -357,6 +380,7 @@ export function buildTransferPsbtV2(params: {
     change,
     params.minerFeeSats,
   );
+
   const allocations = params.tokenOutputs.map((o, i) => ({
     vout: i + 1,
     amount: o.amountAtoms,
@@ -369,6 +393,7 @@ export function buildTransferPsbtV2(params: {
     minerFeeSats: settled.minerFeeSats,
   };
 }
+
 export interface RedeemResult {
   psbt: bitcoin.Psbt;
   prevVault: CoveVaultV3;
@@ -377,10 +402,13 @@ export interface RedeemResult {
   grossSats: Sats;
   redeemFeeSats: Sats;
   netSats: Sats;
+  payoutSats: Sats;
   changeAtoms: bigint;
   wire: Buffer;
+
   minerFeeSats: Sats;
 }
+
 export function buildRedeemPsbtV3(params: {
   network: bitcoin.networks.Network;
   tokenId: Buffer;
@@ -396,10 +424,16 @@ export function buildRedeemPsbtV3(params: {
   sellerChangeScript: Buffer;
   feeScript: Buffer;
   minerFeeSats: Sats;
+
   funderInputs?: ResolvedInput[];
+
   funderChangeScript?: Buffer;
+
   redeemFeeBps?: bigint;
+
   redeemFeeFlatSats?: bigint;
+
+  walletFundedFees?: boolean;
 }): RedeemResult {
   const { nextState, grossSats } = applyRedeemV2(
     params.prevState,
@@ -427,6 +461,7 @@ export function buildRedeemPsbtV3(params: {
   const netSats = grossSats - redeemFeeSats;
   const changeAtoms = params.tokenInputTotalAtoms - params.redeemAmountAtoms;
   if (changeAtoms < 0n) throw new Error("redeem exceeds token input");
+
   const changeCarrierVout = 4;
   const wire = encodeRedeemV2({
     tokenId: params.tokenId,
@@ -436,6 +471,7 @@ export function buildRedeemPsbtV3(params: {
         ? [{ vout: changeCarrierVout, amount: changeAtoms }]
         : [],
   });
+
   const psbt = new bitcoin.Psbt({ network: params.network });
   psbt.addInput({
     hash: params.prevBacking.txid,
@@ -457,9 +493,11 @@ export function buildRedeemPsbtV3(params: {
   for (const input of params.tokenInputs) {
     psbt.addInput(psbtInputFor(input, params.network));
   }
+
   for (const input of params.funderInputs ?? []) {
     psbt.addInput(psbtInputFor(input, params.network));
   }
+
   psbt.addOutput({
     script: Buffer.concat([Buffer.from([0x6a, wire.length]), wire]),
     value: 0,
@@ -468,14 +506,6 @@ export function buildRedeemPsbtV3(params: {
     script: nextVault.scriptPubKey,
     value: Number(RESERVE_ANCHOR_SATS + nextState.backingSats),
   });
-  psbt.addOutput({ script: params.sellerPayoutScript, value: Number(netSats) });
-  psbt.addOutput({ script: params.feeScript, value: Number(redeemFeeSats) });
-  if (changeAtoms > 0n) {
-    psbt.addOutput({
-      script: params.sellerChangeScript,
-      value: Number(TOKEN_CARRIER_SATS),
-    });
-  }
   const funderTotal = (params.funderInputs ?? []).reduce(
     (s, i) => s + i.valueSats,
     0n,
@@ -486,25 +516,59 @@ export function buildRedeemPsbtV3(params: {
     funderTotal;
   const successorValue = RESERVE_ANCHOR_SATS + nextState.backingSats;
   const changeCarrierValue = changeAtoms > 0n ? TOKEN_CARRIER_SATS : 0n;
+  const payoutSats = params.walletFundedFees
+    ? totalIn -
+      successorValue -
+      redeemFeeSats -
+      changeCarrierValue -
+      params.minerFeeSats
+    : netSats;
+  if (
+    params.walletFundedFees &&
+    (payoutSats < grossSats ||
+      payoutSats < dustThreshold(params.sellerPayoutScript))
+  )
+    throw new Error(
+      "insufficient redeem funds; add a BTC funding input to pay fees and return standard BTC change",
+    );
+  if (
+    params.walletFundedFees &&
+    params.funderChangeScript &&
+    !params.funderChangeScript.equals(params.sellerPayoutScript)
+  )
+    throw new Error(
+      "wallet-funded redeem must return BTC change to the payout address",
+    );
+  psbt.addOutput({
+    script: params.sellerPayoutScript,
+    value: Number(payoutSats),
+  });
+  psbt.addOutput({ script: params.feeScript, value: Number(redeemFeeSats) });
+  if (changeAtoms > 0n)
+    psbt.addOutput({
+      script: params.sellerChangeScript,
+      value: Number(TOKEN_CARRIER_SATS),
+    });
   const change =
     totalIn -
     successorValue -
-    netSats -
+    payoutSats -
     redeemFeeSats -
     changeCarrierValue -
     params.minerFeeSats;
-  if (change < 0n) {
+  if (change < 0n)
     throw new Error(
-      `insufficient redeem funds: need ${-change} more sats; ` +
-        `add a BTC funding input (carriers alone cover only ${params.tokenInputs.length * 1000} sats)`,
+      `insufficient redeem funds: need ${-change} more sats; add a BTC funding input`,
     );
-  }
-  const settled = addChangeOrAbsorb(
-    psbt,
-    params.funderChangeScript ?? params.sellerChangeScript,
-    change,
-    params.minerFeeSats,
-  );
+  const settled = params.walletFundedFees
+    ? { minerFeeSats: params.minerFeeSats }
+    : addChangeOrAbsorb(
+        psbt,
+        params.funderChangeScript ?? params.sellerChangeScript,
+        change,
+        params.minerFeeSats,
+      );
+
   return {
     psbt,
     prevVault,
@@ -512,10 +576,12 @@ export function buildRedeemPsbtV3(params: {
     nextVault,
     grossSats,
     redeemFeeSats,
+    payoutSats,
     netSats,
     changeAtoms,
     wire,
     minerFeeSats: settled.minerFeeSats,
   };
 }
+
 export { grossBuy, COVE_FEE_CONFIG };

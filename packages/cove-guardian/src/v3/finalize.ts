@@ -19,6 +19,7 @@ import {
   computeTokenId,
 } from "@crclaunch/cove-wire";
 import {
+  isValidRedeemPayout,
   COVE_FEE_CONFIG,
   CREATOR_RECORD_SATS,
   LAUNCH_FEE_SATS,
@@ -38,9 +39,11 @@ import {
   buildCanonicalRedeemWitness,
 } from "./witness.js";
 import type { CoveCanonicalView, GuardianV3Network } from "./types.js";
+
 const ValidatedCoveTransactionBrand: unique symbol = Symbol(
   "ValidatedCoveTransaction",
 );
+
 export interface ValidatedCoveTransaction {
   readonly [ValidatedCoveTransactionBrand]: true;
   readonly rawTxHex: string;
@@ -49,16 +52,20 @@ export interface ValidatedCoveTransaction {
   readonly tokenId: string;
   readonly validationDigest: string;
 }
+
 export interface FinalValidationRejection {
   ok: false;
   reason: string;
 }
+
 export type FinalValidationResult =
   ValidatedCoveTransaction | FinalValidationRejection;
+
 export interface ResolvedPrevout {
   script: Buffer;
   valueSats: bigint;
 }
+
 export interface FinalizeParams {
   rawTxHex: string;
   view: CoveCanonicalView;
@@ -68,17 +75,25 @@ export interface FinalizeParams {
   recoveryProfile?: VaultRecoveryProfile;
   feeScript: Buffer;
   maxMinerFeeSats?: bigint;
+
   prevouts?: Map<string, ResolvedPrevout>;
+
   buyFeeBps?: bigint;
+
   buyFeeFlatSats?: bigint;
+
   creatorFeeBps?: bigint;
   redeemFeeBps?: bigint;
+
   redeemFeeFlatSats?: bigint;
 }
-const MAX_MINER_FEE = 20000n;
+
+const MAX_MINER_FEE = 20_000n;
+
 function reject(reason: string): FinalValidationRejection {
   return { ok: false, reason };
 }
+
 function btcNetwork(network: GuardianV3Network): bitcoin.networks.Network {
   switch (network) {
     case "regtest":
@@ -92,9 +107,11 @@ function btcNetwork(network: GuardianV3Network): bitcoin.networks.Network {
       throw new Error(`bad network ${String(network)}`);
   }
 }
+
 function outpointKey(txid: string, vout: number): string {
   return `${txid}:${vout}`;
 }
+
 function validated(
   rawTxHex: string,
   txid: string,
@@ -111,9 +128,11 @@ function validated(
     validationDigest: digest,
   };
 }
+
 function isStandardCarrier(script: Buffer): boolean {
   return isP2TR(script) || isP2WPKH(script);
 }
+
 function parseTx(
   rawTxHex: string,
 ): bitcoin.Transaction | FinalValidationRejection {
@@ -123,6 +142,7 @@ function parseTx(
     return reject(`BAD_TX: ${(e as Error).message}`);
   }
 }
+
 function decodeWire(tx: bitcoin.Transaction) {
   try {
     return decodeCoveOpReturnTx(tx);
@@ -130,9 +150,11 @@ function decodeWire(tx: bitcoin.Transaction) {
     return reject((e as Error).message);
   }
 }
+
 function inputTxid(ins: bitcoin.TxInput): string {
   return Buffer.from(ins.hash).reverse().toString("hex");
 }
+
 function checkMinerFee(
   tx: bitcoin.Transaction,
   prevouts: Map<string, ResolvedPrevout> | undefined,
@@ -153,6 +175,7 @@ function checkMinerFee(
     return reject(`MINER_FEE_EXCEEDED: ${minerFee} > ${maxMinerFee}`);
   return null;
 }
+
 export function validateFinalizedDeployTransaction(params: {
   rawTxHex: string;
   network: GuardianV3Network;
@@ -160,6 +183,7 @@ export function validateFinalizedDeployTransaction(params: {
   guardianXOnly: Buffer;
   recoveryKeyXOnly: Buffer;
   recoveryProfile?: VaultRecoveryProfile;
+
   feeScript: Buffer;
 }): FinalValidationResult {
   const parsed = parseTx(params.rawTxHex);
@@ -168,6 +192,7 @@ export function validateFinalizedDeployTransaction(params: {
   const wire = decodeWire(tx);
   if ("ok" in wire) return wire;
   if (wire.op !== OP_DEPLOY) return reject("WRONG_OPCODE");
+
   const creatorOut = tx.outs[2];
   if (
     !creatorOut ||
@@ -213,6 +238,7 @@ export function validateFinalizedDeployTransaction(params: {
     tokenId.toString("hex"),
   );
 }
+
 export async function validateFinalizedMintTransaction(
   params: FinalizeParams,
 ): Promise<FinalValidationResult> {
@@ -224,10 +250,12 @@ export async function validateFinalizedMintTransaction(
   if ("ok" in wire) return wire;
   if (wire.op !== OP_MINT) return reject("WRONG_OPCODE");
   const tokenId = wire.tokenId;
+
   const currentState = params.view.getCurrentBackingState(tokenId);
   if (!currentState) return reject("UNKNOWN_TOKEN");
   const backingOutpoint = params.view.getBackingOutpoint(tokenId);
   if (!backingOutpoint) return reject("UNKNOWN_TOKEN");
+
   const ins0 = tx.ins[0];
   if (!ins0) return reject("BAD_TX");
   if (
@@ -236,6 +264,7 @@ export async function validateFinalizedMintTransaction(
   ) {
     return reject("BACKING_VOUT_MISMATCH");
   }
+
   const prevVault = buildBackingVaultV3({
     state: currentState,
     guardianXOnly: params.guardianXOnly,
@@ -252,6 +281,7 @@ export async function validateFinalizedMintTransaction(
     if (prev0.valueSats !== expectedPrevValue)
       return reject("BACKING_VALUE_MISMATCH");
   }
+
   let nextState: CoveStateV2;
   let grossSats: bigint;
   try {
@@ -267,6 +297,7 @@ export async function validateFinalizedMintTransaction(
     params.buyFeeBps ?? COVE_FEE_CONFIG.buyFeeBps,
     params.buyFeeFlatSats ?? COVE_FEE_CONFIG.buyFeeFlatSats,
   );
+
   const nextVault = buildBackingVaultV3({
     state: nextState,
     guardianXOnly: params.guardianXOnly,
@@ -315,12 +346,15 @@ export async function validateFinalizedMintTransaction(
   ) {
     return reject("CREATOR_FEE_MISMATCH");
   }
+
   const last = tx.outs[tx.outs.length - 1];
   const discovery =
     tx.outs.length > 5 && last !== undefined && last.script[0] === 0x6a ? 1 : 0;
   if (tx.outs.length > 6 + discovery) return reject("UNEXPECTED_OUTPUT");
+
   const minerFeeErr = checkMinerFee(tx, params.prevouts, maxMinerFee);
   if (minerFeeErr) return minerFeeErr;
+
   const w = buildCanonicalMintWitness({
     prevState: currentState,
     nextState,
@@ -331,6 +365,7 @@ export async function validateFinalizedMintTransaction(
   const sim = await executeMintV3(w.witness);
   if (sim.result !== "PASS")
     return reject(sim.failure ?? "SIMPLICITY_REJECTED");
+
   return validated(
     params.rawTxHex,
     tx.getId(),
@@ -338,6 +373,7 @@ export async function validateFinalizedMintTransaction(
     tokenId.toString("hex"),
   );
 }
+
 export async function validateFinalizedRedeemTransaction(
   params: FinalizeParams,
 ): Promise<FinalValidationResult> {
@@ -349,10 +385,12 @@ export async function validateFinalizedRedeemTransaction(
   if ("ok" in wire) return wire;
   if (wire.op !== OP_REDEEM) return reject("WRONG_OPCODE");
   const tokenId = wire.tokenId;
+
   const currentState = params.view.getCurrentBackingState(tokenId);
   if (!currentState) return reject("UNKNOWN_TOKEN");
   const backingOutpoint = params.view.getBackingOutpoint(tokenId);
   if (!backingOutpoint) return reject("UNKNOWN_TOKEN");
+
   const ins0 = tx.ins[0];
   if (!ins0) return reject("BAD_TX");
   if (
@@ -361,6 +399,7 @@ export async function validateFinalizedRedeemTransaction(
   ) {
     return reject("BACKING_VOUT_MISMATCH");
   }
+
   const prevVault = buildBackingVaultV3({
     state: currentState,
     guardianXOnly: params.guardianXOnly,
@@ -376,6 +415,7 @@ export async function validateFinalizedRedeemTransaction(
     if (prev0.valueSats !== expectedPrevValue)
       return reject("BACKING_VALUE_MISMATCH");
   }
+
   let tokenInputTotalAtoms = 0n;
   for (let i = 1; i < tx.ins.length; i++) {
     const ins = tx.ins[i]!;
@@ -389,6 +429,7 @@ export async function validateFinalizedRedeemTransaction(
     }
   }
   if (tokenInputTotalAtoms === 0n) return reject("FORGED_TOKEN_INPUT");
+
   const changeAtoms = tokenInputTotalAtoms - wire.redeemAmount;
   if (changeAtoms < 0n) return reject("TOKEN_OWNERSHIP_INSUFFICIENT");
   const wireChangeSum = wire.changeAllocations.reduce(
@@ -396,6 +437,7 @@ export async function validateFinalizedRedeemTransaction(
     0n,
   );
   if (wireChangeSum !== changeAtoms) return reject("TOKEN_CHANGE_MISMATCH");
+
   let nextState: CoveStateV2;
   let grossSats: bigint;
   try {
@@ -410,7 +452,7 @@ export async function validateFinalizedRedeemTransaction(
     params.redeemFeeBps ?? COVE_FEE_CONFIG.redeemFeeBps,
     params.redeemFeeFlatSats ?? COVE_FEE_CONFIG.redeemFeeFlatSats,
   );
-  const netPayoutSats = grossSats - protocolFeeSats;
+
   const nextVault = buildBackingVaultV3({
     state: nextState,
     guardianXOnly: params.guardianXOnly,
@@ -426,7 +468,15 @@ export async function validateFinalizedRedeemTransaction(
     return reject("SUCCESSOR_VALUE_MISMATCH");
   }
   const payout = tx.outs[2];
-  if (!payout || BigInt(payout.value) !== netPayoutSats)
+  if (
+    !payout ||
+    !isValidRedeemPayout(
+      grossSats,
+      protocolFeeSats,
+      BigInt(payout.value),
+      payout.script,
+    )
+  )
     return reject("PAYOUT_MISMATCH");
   const feeOut = tx.outs[3];
   if (
@@ -442,6 +492,7 @@ export async function validateFinalizedRedeemTransaction(
     params.redeemFeeBps ?? COVE_FEE_CONFIG.redeemFeeBps,
   );
   if (!settlement.isStandard) return reject("PROTOCOL_FEE_DUST");
+
   if (changeAtoms > 0n) {
     const changeOut = tx.outs[4];
     if (!changeOut) return reject("TOKEN_CHANGE_MISMATCH");
@@ -459,10 +510,13 @@ export async function validateFinalizedRedeemTransaction(
     if (tx.outs.length > 6) return reject("UNEXPECTED_OUTPUT");
   } else {
     if (wire.changeAllocations.length !== 0) return reject("TOKEN_INFLATION");
+
     if (tx.outs.length > 5) return reject("UNEXPECTED_OUTPUT");
   }
+
   const minerFeeErr = checkMinerFee(tx, params.prevouts, maxMinerFee);
   if (minerFeeErr) return minerFeeErr;
+
   const w = buildCanonicalRedeemWitness({
     prevState: currentState,
     nextState,
@@ -473,6 +527,7 @@ export async function validateFinalizedRedeemTransaction(
   const sim = await executeRedeemV3(w.witness);
   if (sim.result !== "PASS")
     return reject(sim.failure ?? "SIMPLICITY_REJECTED");
+
   return validated(
     params.rawTxHex,
     tx.getId(),
@@ -480,6 +535,7 @@ export async function validateFinalizedRedeemTransaction(
     tokenId.toString("hex"),
   );
 }
+
 export function validateFinalizedTransferTransaction(params: {
   rawTxHex: string;
   view: CoveCanonicalView;
@@ -493,6 +549,7 @@ export function validateFinalizedTransferTransaction(params: {
   if ("ok" in wire) return wire;
   if (wire.op !== OP_TRANSFER) return reject("WRONG_OPCODE");
   const tokenId = wire.tokenId;
+
   let tokenIn = 0n;
   for (const ins of tx.ins) {
     const tok = params.view.getTokenUtxo({
@@ -508,6 +565,7 @@ export function validateFinalizedTransferTransaction(params: {
   const allocSum = wire.allocations.reduce((s, a) => s + a.amount, 0n);
   if (allocSum !== tokenIn)
     return reject(`TOKEN_CONSERVATION: in=${tokenIn} out=${allocSum}`);
+
   for (const a of wire.allocations) {
     const out = tx.outs[a.vout];
     if (!out) return reject("ALLOCATION_VOUT_MISSING");
@@ -515,9 +573,11 @@ export function validateFinalizedTransferTransaction(params: {
       return reject("CARRIER_VALUE_MISMATCH");
     if (!isStandardCarrier(out.script)) return reject("CARRIER_NOT_STANDARD");
   }
+
   const maxMinerFee = params.maxMinerFeeSats ?? MAX_MINER_FEE;
   const minerFeeErr = checkMinerFee(tx, params.prevouts, maxMinerFee);
   if (minerFeeErr) return minerFeeErr;
+
   return validated(
     params.rawTxHex,
     tx.getId(),
@@ -525,4 +585,5 @@ export function validateFinalizedTransferTransaction(params: {
     tokenId.toString("hex"),
   );
 }
+
 export { outpointKey };
