@@ -263,6 +263,7 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
           psbtBase64: req.psbt.toBase64(),
           auditHash: receipt.auditHash,
           resultJson: stringifyBigint(this.signedOutcome(record)),
+          txid: signedTransactionId(req.psbt),
         },
       });
       const stored = await this.journal.readSigned?.({
@@ -574,5 +575,18 @@ export class RemoteGuardianTransitionSigner implements GuardianTransitionSigner 
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+}
+function signedTransactionId(psbt: bitcoin.Psbt): string | undefined {
+  try {
+    const final = bitcoin.Psbt.fromBase64(psbt.toBase64());
+    for (let i = 1; i < final.data.inputs.length; i++) {
+      const input = final.data.inputs[i]!;
+      if (!input.finalScriptSig && !input.finalScriptWitness)
+        final.finalizeInput(i);
+    }
+    return final.extractTransaction().getId();
+  } catch {
+    return undefined;
   }
 }

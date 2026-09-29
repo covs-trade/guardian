@@ -92,6 +92,7 @@ export interface StoredSigningResult {
   psbtBase64: string;
   resultJson: string;
   auditHash: string;
+  txid?: string;
 }
 export const SIGNING_JOURNAL_TTL_MS = 30 * 60 * 1000;
 export interface SigningJournalStore {
