@@ -1,5 +1,6 @@
 import * as bitcoin from "bitcoinjs-lib";
 import { randomUUID } from "node:crypto";
+import { getRpcOperationSignal } from "@crclaunch/bitcoin";
 import { stateHashV2, type CoveCanonicalView } from "@crclaunch/cove-covenant";
 import {
   buildBackingVaultV3,
@@ -181,9 +182,11 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
     req: TransitionSignRequest,
     op: "MINT" | "REDEEM",
   ): Promise<TransitionSignOutcome> {
+    getRpcOperationSignal()?.throwIfAborted();
     const guardianXOnly = await this.signer.xOnlyPubkey();
     const cached = await this.recoverSigned(req, op);
     if (cached) return cached;
+    getRpcOperationSignal()?.throwIfAborted();
     const validate = await (op === "MINT"
       ? validateMintTransitionV3({ ...req, guardianXOnly })
       : validateRedeemTransitionV3({ ...req, guardianXOnly }));
@@ -196,6 +199,7 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
       };
     }
     const analysis = validate.analysis;
+    getRpcOperationSignal()?.throwIfAborted();
     const risk = checkRiskPolicy(this.riskPolicy, analysis, op);
     if (risk) {
       return {
@@ -229,6 +233,7 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
         audit: record,
       };
     }
+    getRpcOperationSignal()?.throwIfAborted();
     const reservation = await this.journal.reserve({
       network: req.network,
       backingTxid: record.backingOutpoint.txid,
@@ -252,6 +257,7 @@ export class LocalGuardianTransitionSigner implements GuardianTransitionSigner {
       op === "MINT" ? prevVault.mintControlBlock : prevVault.redeemControlBlock;
     let signatureProduced = false;
     try {
+      getRpcOperationSignal()?.throwIfAborted();
       await this.signer.signVaultExecutionLeaf(req.psbt, 0, leaf, control);
       signatureProduced = true;
       await this.journal.markSigned({

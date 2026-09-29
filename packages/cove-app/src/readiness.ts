@@ -1,4 +1,4 @@
-import type { CoreRpcProvider } from "@crclaunch/bitcoin";
+import type { BlockchainInfo, CoreRpcProvider } from "@crclaunch/bitcoin";
 import type { MainnetProfile } from "@crclaunch/cove-mainnet";
 import {
   mainnetProfileComplete,
@@ -29,6 +29,7 @@ export async function checkCoreAgreement(
   secondary: CoreRpcProvider,
   opts: {
     maxHeightDelta?: number;
+    primaryInfo?: BlockchainInfo;
   } = {},
 ): Promise<CoreAgreementResult> {
   const maxDelta = opts.maxHeightDelta ?? 3;
@@ -38,16 +39,10 @@ export async function checkCoreAgreement(
     comparisonHeight: null,
     comparisonHash: null,
   };
-  let pi: {
-    chain: string;
-    blocks: number;
-  };
-  let si: {
-    chain: string;
-    blocks: number;
-  };
+  let pi: BlockchainInfo;
+  let si: BlockchainInfo;
   try {
-    pi = await primary.getBlockchainInfo();
+    pi = opts.primaryInfo ?? (await primary.getBlockchainInfo());
     si = await secondary.getBlockchainInfo();
   } catch (e) {
     return { agreed: false, ...empty, detail: (e as Error).message };
@@ -74,8 +69,12 @@ export async function checkCoreAgreement(
   const comparisonHeight = Math.min(pi.blocks, si.blocks);
   try {
     const [ph, sh] = await Promise.all([
-      primary.getBlockHash(comparisonHeight),
-      secondary.getBlockHash(comparisonHeight),
+      pi.blocks === comparisonHeight
+        ? pi.bestBlockHash
+        : primary.getBlockHash(comparisonHeight),
+      si.blocks === comparisonHeight
+        ? si.bestBlockHash
+        : secondary.getBlockHash(comparisonHeight),
     ]);
     const agreed = ph === sh;
     return {

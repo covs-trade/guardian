@@ -1,4 +1,14 @@
-import { eq, and, or, inArray } from "drizzle-orm";
+import {
+  eq,
+  and,
+  or,
+  inArray,
+  asc,
+  desc,
+  sum,
+  count,
+  isNull,
+} from "drizzle-orm";
 import { schema, type Database } from "@crclaunch/db";
 import {
   getTokenUtxosByScriptDb,
@@ -13,22 +23,55 @@ export async function getWalletPortfolio(
   db: Database,
   network: string,
   walletScript: string,
+  opts: {
+    limit?: number;
+    offset?: number;
+  } = {},
 ) {
-  const utxos = await getTokenUtxosByScriptDb(db, network, walletScript);
-  const byToken = new Map<string, Holding>();
-  for (const u of utxos) {
-    const h = byToken.get(u.tokenId) ?? {
-      tokenId: u.tokenId,
-      amountAtoms: 0n,
-      utxoCount: 0,
-    };
-    h.amountAtoms += u.amountAtoms;
-    h.utxoCount += 1;
-    byToken.set(u.tokenId, h);
-  }
-  const holdings = [...byToken.values()].sort((a, b) =>
-    a.tokenId < b.tokenId ? -1 : 1,
-  );
+  const limit = Math.max(1, Math.min(opts.limit ?? 200, 500));
+  const offset = Math.max(0, opts.offset ?? 0);
+  const holdingRows = await db
+    .select({
+      tokenId: schema.coveV3TokenUtxos.tokenId,
+      amountAtoms: sum(schema.coveV3TokenUtxos.amountAtoms),
+      utxoCount: count(),
+    })
+    .from(schema.coveV3TokenUtxos)
+    .where(
+      and(
+        eq(schema.coveV3TokenUtxos.network, network),
+        eq(schema.coveV3TokenUtxos.scriptPubKey, walletScript),
+        eq(schema.coveV3TokenUtxos.canonical, true),
+        isNull(schema.coveV3TokenUtxos.spentByTxid),
+      ),
+    )
+    .groupBy(schema.coveV3TokenUtxos.tokenId)
+    .orderBy(asc(schema.coveV3TokenUtxos.tokenId))
+    .limit(limit + 1)
+    .offset(offset);
+  const holdings: Holding[] = holdingRows
+    .slice(0, limit)
+    .map((r) => ({
+      ...r,
+      amountAtoms: BigInt(r.amountAtoms ?? "0"),
+      utxoCount: Number(r.utxoCount),
+    }));
+  const utxos = await getTokenUtxosByScriptDb(db, network, walletScript, {
+    limit: limit + 1,
+    offset,
+  });
+  const sellerListings = db
+    .select({ listingId: schema.coveV3MarketListings.listingId })
+    .from(schema.coveV3MarketListings)
+    .where(
+      and(
+        eq(schema.coveV3MarketListings.network, network),
+        or(
+          eq(schema.coveV3MarketListings.sellerTokenScript, walletScript),
+          eq(schema.coveV3MarketListings.sellerPayoutScript, walletScript),
+        ),
+      ),
+    );
   const listingRows = await db
     .select()
     .from(schema.coveV3MarketListings)
@@ -40,14 +83,13 @@ export async function getWalletPortfolio(
           eq(schema.coveV3MarketListings.sellerPayoutScript, walletScript),
         ),
       ),
-    );
-  const listings = listingRows.map(
-    ({ sellerPresignedPsbt: _secret, ...rest }) => {
-      void _secret;
-      return rest;
-    },
-  );
-  const sellerListingIds = listings.map((l) => l.listingId);
+    )
+    .orderBy(
+      desc(schema.coveV3MarketListings.createdAt),
+      desc(schema.coveV3MarketListings.listingId),
+    )
+    .limit(limit + 1)
+    .offset(offset);
   const fills = await db
     .select()
     .from(schema.coveV3MarketFills)
@@ -57,24 +99,60 @@ export async function getWalletPortfolio(
         or(
           eq(schema.coveV3MarketFills.buyerTokenScript, walletScript),
           eq(schema.coveV3MarketFills.buyerChangeScript, walletScript),
-          ...(sellerListingIds.length > 0
-            ? [inArray(schema.coveV3MarketFills.listingId, sellerListingIds)]
-            : []),
+          inArray(schema.coveV3MarketFills.listingId, sellerListings),
         ),
       ),
-    );
+    )
+    .orderBy(
+      desc(schema.coveV3MarketFills.createdAt),
+      desc(schema.coveV3MarketFills.id),
+    )
+    .limit(limit + 1)
+    .offset(offset);
+  const listings = listingRows
+    .slice(0, limit)
+    .map(({ sellerPresignedPsbt: _secret, ...rest }) => {
+      void _secret;
+      return rest;
+    });
   return {
     walletScript,
     holdings,
-    tokenUtxos: utxos.map((u) => ({
-      txid: u.txid,
-      vout: u.vout,
-      tokenId: u.tokenId,
-      amountAtoms: u.amountAtoms,
-      scriptPubKey: u.scriptPubKey,
-    })),
+    tokenUtxos: utxos
+      .slice(0, limit)
+      .map((u) => ({
+        txid: u.txid,
+        vout: u.vout,
+        tokenId: u.tokenId,
+        amountAtoms: u.amountAtoms,
+        scriptPubKey: u.scriptPubKey,
+      })),
     listings,
-    fills,
+    fills: fills.slice(0, limit).map((fill) => ({
+      id: fill.id,
+      listingId: fill.listingId,
+      tokenId: fill.tokenId,
+      status: fill.status,
+      amountAtoms: fill.amountAtoms,
+      totalPriceSats: fill.totalPriceSats,
+      marketFeeSats: fill.marketFeeSats,
+      minerFeeSats: fill.minerFeeSats,
+      txid: fill.txid,
+      blockHeight: fill.blockHeight,
+      canonical: fill.canonical,
+      createdAt: fill.createdAt,
+      updatedAt: fill.updatedAt,
+    })),
+    pagination: {
+      limit,
+      offset,
+      hasMore: {
+        holdings: holdingRows.length > limit,
+        tokenUtxos: utxos.length > limit,
+        listings: listingRows.length > limit,
+        fills: fills.length > limit,
+      },
+    },
   };
 }
 export async function getWalletBalanceAtoms(

@@ -1,4 +1,4 @@
-import type { CoreRpcProvider } from "./provider.js";
+import type { CoreRpcProvider, RpcReadOptions } from "./provider.js";
 export class FeeError extends Error {
   readonly code: "MINER_FEE_TOO_LOW" | "MINER_FEE_TOO_HIGH";
   constructor(
@@ -69,15 +69,24 @@ const FALLBACK_SAT_PER_VB: Record<FeeTierKey, bigint> = {
 };
 export async function loadFeeRates(
   provider: CoreRpcProvider,
+  options?: RpcReadOptions,
 ): Promise<FeeRates> {
-  const floorRaw = await safeMempoolFloor(provider);
+  const [floor, estimates] = await Promise.all([
+    provider.getMempoolMinFeeSatPerVb(options),
+    Promise.all(
+      TIER_TARGETS.map((target) =>
+        provider.estimateFeeRateAt(target.blocks, options),
+      ),
+    ),
+  ]);
+  const floorRaw = floor;
   const floorSatPerVb =
     floorRaw > ABSOLUTE_FLOOR_SAT_PER_VB ? floorRaw : ABSOLUTE_FLOOR_SAT_PER_VB;
   let estimated = false;
   const tiers: FeeTier[] = [];
   let previous = 0n;
-  for (const target of TIER_TARGETS) {
-    let rate = await safeEstimate(provider, target.blocks);
+  for (const [index, target] of TIER_TARGETS.entries()) {
+    let rate = estimates[index] ?? null;
     if (rate === null) {
       estimated = true;
       rate = FALLBACK_SAT_PER_VB[target.key];
@@ -99,23 +108,6 @@ export async function loadFeeRates(
     tiers,
     estimated,
   };
-}
-async function safeMempoolFloor(provider: CoreRpcProvider): Promise<bigint> {
-  try {
-    return await provider.getMempoolMinFeeSatPerVb();
-  } catch {
-    return ABSOLUTE_FLOOR_SAT_PER_VB;
-  }
-}
-async function safeEstimate(
-  provider: CoreRpcProvider,
-  blocks: number,
-): Promise<bigint | null> {
-  try {
-    return await provider.estimateFeeRateAt(blocks);
-  } catch {
-    return null;
-  }
 }
 export interface ResolveMinerFeeInput {
   rateSatPerVb?: bigint;

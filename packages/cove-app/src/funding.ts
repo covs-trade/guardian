@@ -5,7 +5,7 @@ export interface FundingCandidate {
   vout: number;
 }
 export const MAX_FUNDING_INPUTS = 64;
-const FUNDING_LOOKUP_CONCURRENCY = 8;
+const FUNDING_LOOKUP_CONCURRENCY = 4;
 const GLOBAL_FUNDING_LOOKUP_CONCURRENCY = 16;
 const MAX_PENDING_FUNDING_LOOKUPS = 128;
 let activeFundingLookups = 0;
@@ -30,7 +30,9 @@ async function withFundingLookupSlot<T>(work: () => Promise<T>): Promise<T> {
     else activeFundingLookups--;
   }
 }
-function validateFundingCandidates(candidates: FundingCandidate[]): void {
+export function validateFundingCandidates(
+  candidates: FundingCandidate[],
+): void {
   if (!Array.isArray(candidates) || candidates.length > MAX_FUNDING_INPUTS) {
     throw new AppError(
       "FUNDING_INPUT_INVALID",

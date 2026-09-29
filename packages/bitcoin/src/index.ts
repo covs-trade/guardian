@@ -20,6 +20,8 @@ export {
 } from "./decoder.js";
 export {
   CoreRpcProvider,
+  getRpcOperationSignal,
+  operationSignal,
   RpcError,
   isRpcNotFound,
   type RpcReadOptions,
@@ -97,3 +99,7 @@ export {
 } from "./spend.js";
 export { AddressUtxoCache, AddressLookupBusy } from "./address-cache.js";
 export { withRpcDeadline, type RpcConfig } from "./provider.js";
+
+export { readBoundedJson } from "./response.js";
+
+export { broadcastRecordedTransaction } from "./recorded-broadcast.js";

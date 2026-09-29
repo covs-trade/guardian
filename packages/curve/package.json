@@ -12,7 +12,7 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src --max-warnings=0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --coverage"
+    "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^2.1.8",

@@ -5,6 +5,11 @@ import type { SignedTransitionResult, GuardianV3Network } from "./types.js";
 import { decodeCoveOpReturn } from "./resolve.js";
 import { OP_MINT, OP_REDEEM } from "@crclaunch/cove-wire";
 import type { FundingInputChecker } from "./funding.js";
+import {
+  getRpcOperationSignal,
+  operationSignal,
+  readBoundedJson,
+} from "@crclaunch/bitcoin";
 export interface GuardianSignRequestWire {
   requestId: string;
   operation: "MINT" | "REDEEM";
@@ -163,6 +168,7 @@ export class InProcessGuardianTransport implements GuardianTransport {
     };
   }
   async sign(req: GuardianSignRequestWire): Promise<GuardianSignResponseWire> {
+    getRpcOperationSignal()?.throwIfAborted();
     const { psbt } = this.opts.decode(req.psbtBase64);
     const envelope = decodeCoveOpReturn(psbt);
     if (
@@ -181,7 +187,9 @@ export class InProcessGuardianTransport implements GuardianTransport {
       { psbt, network: this.opts.network },
       req.operation,
     );
+    getRpcOperationSignal()?.throwIfAborted();
     const view = recovered ? null : await this.opts.loadView(req.tokenId, psbt);
+    getRpcOperationSignal()?.throwIfAborted();
     const base = {
       network: this.opts.network,
       recoveryKeyXOnly: this.opts.recoveryKeyXOnly,
@@ -250,6 +258,8 @@ export class HttpGuardianTransport implements GuardianTransport {
     path: string,
     body?: unknown,
   ): Promise<unknown> {
+    const signal = operationSignal(AbortSignal.timeout(this.timeoutMs));
+    signal.throwIfAborted();
     const res = await fetch(`${this.endpoint}${path}`, {
       method,
       headers: {
@@ -257,10 +267,12 @@ export class HttpGuardianTransport implements GuardianTransport {
         authorization: `Bearer ${this.authToken}`,
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal,
     });
-    if (!res.ok)
+    if (!res.ok) {
+      await res.body?.cancel();
       throw new Error(`guardian ${method} ${path}: HTTP ${res.status}`);
-    return res.json();
+    }
+    return readBoundedJson(res, 2000000, signal);
   }
 }

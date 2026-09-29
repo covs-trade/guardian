@@ -2,11 +2,18 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as bitcoin from "bitcoinjs-lib";
 import { decodeRawTransaction, type BitcoinProtocolTx } from "./decoder.js";
 const rpcDeadline = new AsyncLocalStorage<AbortSignal>();
+export function getRpcOperationSignal(): AbortSignal | undefined {
+  return rpcDeadline.getStore();
+}
+export function operationSignal(signal: AbortSignal): AbortSignal {
+  const parent = getRpcOperationSignal();
+  return parent ? AbortSignal.any([parent, signal]) : signal;
+}
 export function withRpcDeadline<T>(
   signal: AbortSignal,
   work: () => Promise<T>,
 ): Promise<T> {
-  return rpcDeadline.run(signal, work);
+  return rpcDeadline.run(operationSignal(signal), work);
 }
 export interface BitcoinBlock {
   hash: string;
@@ -119,6 +126,7 @@ export class CoreRpcProvider implements BitcoinChainProvider {
   private id = 0;
   private decodedCache = new Map<string, BitcoinProtocolTx>();
   private rawTransactionPending = new Map<string, Promise<string>>();
+  private mempoolSpenderUnsupported = false;
   constructor(private readonly cfg: RpcConfig) {
     if (cfg.apiKey && (cfg.user || cfg.password)) {
       throw new Error("RPC API key and Basic credentials cannot be combined");
@@ -370,6 +378,7 @@ export class CoreRpcProvider implements BitcoinChainProvider {
   ): Promise<Map<string, string | null> | undefined> {
     if (outpoints.length > 2000) throw new Error("too many mempool outpoints");
     if (!outpoints.length) return new Map();
+    if (this.mempoolSpenderUnsupported) return undefined;
     let rows: {
       txid?: string;
       vout?: number;
@@ -386,8 +395,10 @@ export class CoreRpcProvider implements BitcoinChainProvider {
         error instanceof RpcError &&
         error.kind === "rpc" &&
         error.rpcCode === -32601
-      )
+      ) {
+        this.mempoolSpenderUnsupported = true;
         return undefined;
+      }
       throw error;
     }
     if (

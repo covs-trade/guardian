@@ -87,3 +87,5 @@ export {
   healthErrorFor,
   marketEnabledFlag,
 } from "./health.js";
+
+export { readStoredFeeObservation } from "./fee-observation.js";

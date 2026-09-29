@@ -125,3 +125,5 @@ export {
   MAX_PENDING_ANCESTORS,
   type PendingBackingParams,
 } from "./pending-backing.js";
+
+export { replayPendingBackingAncestry } from "./pending-backing.js";

@@ -1,6 +1,15 @@
-import { eq, and, isNull } from "drizzle-orm";
-import { schema, type Database } from "@crclaunch/db";
-import { ATOMS_PER_TOKEN, PUBLIC_SUPPLY_ATOMS } from "@crclaunch/curve";
+import { eq, and, isNull, asc, sum } from "drizzle-orm";
+import {
+  schema,
+  effectiveBackingObservation,
+  type Database,
+} from "@crclaunch/db";
+import {
+  ATOMS_PER_TOKEN,
+  LOT_TOKENS,
+  PUBLIC_SUPPLY_ATOMS,
+} from "@crclaunch/curve";
+import { MarketError } from "./errors.js";
 import {
   COVE_FEE_CONFIG,
   creatorFeeSats,
@@ -60,18 +69,15 @@ export async function getBuyRoutes(
   },
 ): Promise<BuyRoute[]> {
   const routes: BuyRoute[] = [];
-  if (amountAtoms > 0n && amountAtoms % ATOMS_PER_TOKEN === 0n) {
-    const backing = await db
-      .select({ supplyAtoms: schema.coveV3BackingStates.issuedSupplyAtoms })
-      .from(schema.coveV3BackingStates)
-      .where(
-        and(
-          eq(schema.coveV3BackingStates.network, network),
-          eq(schema.coveV3BackingStates.tokenId, tokenId),
-          eq(schema.coveV3BackingStates.canonical, true),
-        ),
+  if (amountAtoms > 0n && amountAtoms % (LOT_TOKENS * ATOMS_PER_TOKEN) === 0n) {
+    const backing = await effectiveBackingObservation(db, network, tokenId);
+    if (!backing) throw new MarketError("TOKEN_NOT_FOUND", "token not found");
+    if (!backing.fresh || !backing.payload)
+      throw new MarketError(
+        "CORE_UNAVAILABLE",
+        "a fresh validated backing observation is not available; retry shortly",
       );
-    const supplyAtoms = backing[0]?.supplyAtoms ?? 0n;
+    const supplyAtoms = BigInt(backing.payload.issuedSupplyAtoms);
     if (supplyAtoms + amountAtoms <= PUBLIC_SUPPLY_ATOMS) {
       const grossSats = grossBuy(
         supplyAtoms / ATOMS_PER_TOKEN,
@@ -102,7 +108,12 @@ export async function getBuyRoutes(
         eq(schema.coveV3MarketListings.status, "ACTIVE"),
         eq(schema.coveV3MarketListings.amountAtoms, amountAtoms),
       ),
-    );
+    )
+    .orderBy(
+      asc(schema.coveV3MarketListings.totalPriceSats),
+      asc(schema.coveV3MarketListings.listingId),
+    )
+    .limit(100);
   for (const l of listings) {
     const marketFeeSats = deterministicFee(
       l.totalPriceSats,
@@ -140,7 +151,20 @@ export async function getSellOptions(
 ): Promise<{
   redeemQuote: SellOption | null;
   listableUtxos: SellOption[];
+  listableUtxosHasMore: boolean;
 }> {
+  const balanceRows = await db
+    .select({ balanceAtoms: sum(schema.coveV3TokenUtxos.amountAtoms) })
+    .from(schema.coveV3TokenUtxos)
+    .where(
+      and(
+        eq(schema.coveV3TokenUtxos.network, network),
+        eq(schema.coveV3TokenUtxos.tokenId, tokenId),
+        eq(schema.coveV3TokenUtxos.scriptPubKey, ownerScript),
+        eq(schema.coveV3TokenUtxos.canonical, true),
+        isNull(schema.coveV3TokenUtxos.spentByTxid),
+      ),
+    );
   const utxos = await db
     .select()
     .from(schema.coveV3TokenUtxos)
@@ -152,8 +176,13 @@ export async function getSellOptions(
         eq(schema.coveV3TokenUtxos.canonical, true),
         isNull(schema.coveV3TokenUtxos.spentByTxid),
       ),
-    );
-  const listableUtxos: SellOption[] = utxos.map((u) => ({
+    )
+    .orderBy(
+      asc(schema.coveV3TokenUtxos.txid),
+      asc(schema.coveV3TokenUtxos.vout),
+    )
+    .limit(201);
+  const listableUtxos: SellOption[] = utxos.slice(0, 200).map((u) => ({
     kind: "listable-utxo",
     amountAtoms: u.amountAtoms,
     netSats: 0n,
@@ -162,7 +191,7 @@ export async function getSellOptions(
     txid: u.txid,
     vout: u.vout,
   }));
-  const balanceAtoms = utxos.reduce((s, u) => s + u.amountAtoms, 0n);
+  const balanceAtoms = BigInt(balanceRows[0]?.balanceAtoms ?? "0");
   let redeemQuote: SellOption | null = null;
   if (balanceAtoms > 0n && balanceAtoms % ATOMS_PER_TOKEN === 0n) {
     const backing = await db
@@ -191,5 +220,9 @@ export async function getSellOptions(
       };
     }
   }
-  return { redeemQuote, listableUtxos };
+  return {
+    redeemQuote,
+    listableUtxos,
+    listableUtxosHasMore: utxos.length > 200,
+  };
 }

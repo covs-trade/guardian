@@ -14,6 +14,7 @@ export {
 } from "./snapshot.js";
 export {
   computeHealth,
+  healthChainObservation,
   type IndexerHealth,
   type HealthReport,
 } from "./health.js";

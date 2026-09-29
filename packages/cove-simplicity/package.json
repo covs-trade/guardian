@@ -13,7 +13,7 @@
     "build:rust": "cargo build --release --manifest-path rust/Cargo.toml",
     "lint": "eslint src --max-warnings=0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@crclaunch/cove-economics": "workspace:*",

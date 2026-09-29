@@ -59,17 +59,21 @@ async function loadSummaries(
         eq(schema.coveV3Tokens.canonical, true),
       );
   const tokens = await db.select().from(schema.coveV3Tokens).where(tokenCond);
-  const backing = await db
-    .select()
-    .from(schema.coveV3BackingStates)
-    .where(
-      and(
-        eq(schema.coveV3BackingStates.network, network),
-        eq(schema.coveV3BackingStates.canonical, true),
-      ),
-    );
-  const backingByToken = new Map(backing.map((b) => [b.tokenId, b]));
   const ids = tokens.map((t) => t.tokenId);
+  const backing =
+    ids.length === 0
+      ? []
+      : await db
+          .select()
+          .from(schema.coveV3BackingStates)
+          .where(
+            and(
+              eq(schema.coveV3BackingStates.network, network),
+              eq(schema.coveV3BackingStates.canonical, true),
+              inArray(schema.coveV3BackingStates.tokenId, ids),
+            ),
+          );
+  const backingByToken = new Map(backing.map((b) => [b.tokenId, b]));
   const metas =
     ids.length > 0 ? await listTokenMetadataByTokenIds(db, network, ids) : [];
   const metaByToken = new Map(metas.map((m) => [m.tokenId, m]));
@@ -218,9 +222,9 @@ export async function getTokenHolders(
   network: string,
   tokenId: string,
   limit = 100,
+  offset = 0,
 ) {
-  const rows = await getTokenHoldersDb(db, network, tokenId);
-  return rows.slice(0, limit);
+  return getTokenHoldersDb(db, network, tokenId, limit, offset);
 }
 export async function getTokenActivity(
   db: Database,

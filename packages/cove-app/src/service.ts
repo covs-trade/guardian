@@ -1,12 +1,34 @@
-import { isRpcNotFound } from "@crclaunch/bitcoin";
-import { indexedBackingConflict } from "./backing-conflict.js";
-import { buildBackingVaultV3 } from "@crclaunch/cove-vault";
 import * as bitcoin from "bitcoinjs-lib";
 import * as ecc from "tiny-secp256k1";
 import { randomBytes } from "node:crypto";
-import { eq, and, isNull } from "drizzle-orm";
-import { schema, type Database } from "@crclaunch/db";
-import type { CoreRpcProvider } from "@crclaunch/bitcoin";
+import { eq, and, sql, isNull } from "drizzle-orm";
+import {
+  schema,
+  PostgresRpcBudget,
+  providerAccount,
+  databaseDate,
+  effectiveBackingObservation,
+  acceptedObservationCandidate,
+  publishAcceptedObservation,
+  getSubmission,
+  prepareSubmission,
+  claimSubmission,
+  saveSignedSubmission,
+  publishSubmission,
+  deferSubmission,
+  dueSubmissions,
+  haltSubmission,
+  resumeSubmission,
+  SubmissionError,
+  type Submission,
+  type Database,
+} from "@crclaunch/db";
+import {
+  isRpcNotFound,
+  broadcastRecordedTransaction,
+  type CoreRpcProvider,
+} from "@crclaunch/bitcoin";
+import { buildBackingVaultV3 } from "@crclaunch/cove-vault";
 import {
   TOKEN_CARRIER_SATS,
   applyMintV2,
@@ -40,6 +62,8 @@ import {
 import {
   loadCanonicalViewSnapshotFromDb,
   computeHealth,
+  healthChainObservation,
+  type HealthReport,
   getTokenUtxosByScriptDb,
   getLiveTokenUtxosAtDb,
 } from "@crclaunch/cove-indexer/v3";
@@ -77,6 +101,7 @@ import {
   getSellOptions,
   type ListingV1,
 } from "@crclaunch/cove-market";
+import { indexedBackingConflictQuery } from "./backing-conflict.js";
 import { AppError } from "./errors.js";
 import { DEV_RISK_POLICY } from "./transition-signer.js";
 import type { V3AppConfig, V3Network } from "./config.js";
@@ -90,6 +115,7 @@ import {
 } from "./psbt.js";
 import {
   resolveFundingUtxos,
+  validateFundingCandidates,
   type FundingCandidate,
   type ResolvedFunding,
 } from "./funding.js";
@@ -100,7 +126,6 @@ import {
 } from "./wallet-identity.js";
 import {
   estimateOperationVsize,
-  loadFeeRates,
   resolveMinerFee,
   FeeError,
   type CoveOperation,
@@ -109,8 +134,8 @@ import {
 import {
   createTxSession,
   requireTxSession,
-  updateTxSession,
   listSubmittedSpendsOfBacking,
+  type TxSessionRow,
 } from "./tx-session.js";
 import {
   upsertTokenMetadata,
@@ -125,6 +150,7 @@ import {
 } from "./token-read.js";
 import { getWalletPortfolio } from "./wallet-read.js";
 import { getV3Status } from "./health.js";
+import { readFeeObservation } from "./runtime-snapshot.js";
 bitcoin.initEccLib(ecc as unknown as Parameters<typeof bitcoin.initEccLib>[0]);
 export interface LaunchPrepareInput {
   ticker: string;
@@ -210,7 +236,6 @@ const MAX_TRANSFER_TOKEN_INPUTS = 4;
 const DEFAULT_LISTING_BLOCKS = 1008n;
 const MAX_PENDING_BACKING_CHAIN = 24;
 const BACKING_SUCCESSOR_VOUT = 1;
-const FEE_RATE_CACHE_MS = 15000;
 function assertRedeemPayoutIsPayable(params: {
   grossSats: bigint;
   feeSats: bigint;
@@ -233,10 +258,6 @@ export class V3AppService {
   readonly market: MarketService;
   readonly fundingChecker: FundingInputChecker;
   private readonly assets: AssetLookup | null;
-  private feeRatesCache: {
-    at: number;
-    rates: FeeRates;
-  } | null = null;
   constructor(
     readonly db: Database,
     readonly provider: CoreRpcProvider,
@@ -244,9 +265,24 @@ export class V3AppService {
     readonly transitionSigner: GuardianTransitionSigner,
     readonly secondaryProvider: CoreRpcProvider | null = null,
   ) {
-    this.assets = config.ordUrl ? ordAssetLookup(config.ordUrl) : null;
+    this.assets = config.ordUrl
+      ? ordAssetLookup(config.ordUrl, {
+          budget: new PostgresRpcBudget(
+            db,
+            `ord:${providerAccount({ url: config.ordUrl })}`,
+            "public",
+            3,
+          ),
+        })
+      : null;
     this.fundingChecker = chainFundingChecker({
       chain: provider,
+      expectedChain:
+        config.network === "mainnet"
+          ? "main"
+          : config.network === "testnet"
+            ? "test"
+            : config.network,
       isCoveCarrier: async (o) =>
         (await getLiveTokenUtxosAtDb(db, config.network, [o])).length > 0,
       assets: this.assets ?? undefined,
@@ -321,7 +357,7 @@ export class V3AppService {
       );
     }
   }
-  private async requireHealthy(): Promise<void> {
+  private async requireHealthy(): Promise<HealthReport> {
     const health = await computeHealth({
       db: this.db,
       network: this.config.network,
@@ -342,6 +378,9 @@ export class V3AppService {
       const agreement = await checkCoreAgreement(
         this.provider,
         this.secondaryProvider,
+        {
+          primaryInfo: healthChainObservation(health, this.provider),
+        },
       );
       if (!agreement.agreed)
         throw new AppError(
@@ -366,13 +405,25 @@ export class V3AppService {
         );
       }
     }
+    return health;
+  }
+  private validateTokenAmount(
+    tokenId: string,
+    amountAtoms: bigint,
+    multiple = 1n,
+  ): void {
+    if (!/^[0-9a-f]{64}$/i.test(tokenId))
+      throw new AppError("TOKEN_NOT_FOUND", "token id must be 32-byte hex");
+    if (
+      typeof amountAtoms !== "bigint" ||
+      amountAtoms <= 0n ||
+      amountAtoms > PUBLIC_SUPPLY_ATOMS ||
+      amountAtoms % multiple !== 0n
+    )
+      throw new AppError("TOKEN_AMOUNT_INVALID", "invalid token amount");
   }
   status() {
-    return getV3Status({
-      db: this.db,
-      provider: this.provider,
-      config: this.config,
-    });
+    return getV3Status({ db: this.db, config: this.config });
   }
   listTokens(opts?: { ticker?: string; search?: string; limit?: number }) {
     return listV3Tokens(this.db, this.config.network, opts);
@@ -380,20 +431,65 @@ export class V3AppService {
   tokenDetail(tokenId: string) {
     return getV3TokenDetail(this.db, this.config.network, tokenId);
   }
-  tokenHolders(tokenId: string, limit?: number) {
-    return getTokenHolders(this.db, this.config.network, tokenId, limit);
+  tokenHolders(tokenId: string, limit?: number, offset = 0) {
+    return getTokenHolders(
+      this.db,
+      this.config.network,
+      tokenId,
+      limit,
+      offset,
+    );
   }
   tokenActivity(tokenId: string, limit?: number) {
     return getTokenActivity(this.db, this.config.network, tokenId, limit);
   }
-  walletPortfolio(walletScript: string) {
-    return getWalletPortfolio(this.db, this.config.network, walletScript);
+  walletPortfolio(
+    walletScript: string,
+    opts?: {
+      limit?: number;
+      offset?: number;
+    },
+  ) {
+    return getWalletPortfolio(this.db, this.config.network, walletScript, opts);
   }
   private async loadBacking(tokenId: string): Promise<BackingRow> {
     return this.followPendingBacking(
       tokenId,
       await this.loadConfirmedBacking(tokenId),
     );
+  }
+  private async loadQuoteBacking(tokenId: string) {
+    const observation = await effectiveBackingObservation(
+      this.db,
+      this.config.network,
+      tokenId,
+    );
+    if (!observation) throw new AppError("TOKEN_NOT_FOUND", "token not found");
+    if (!observation.fresh || !observation.payload)
+      throw new AppError(
+        "CORE_UNAVAILABLE",
+        "a fresh validated backing observation is not available; retry shortly",
+      );
+    const p = observation.payload;
+    return {
+      state: {
+        stateVersion: p.stateVersion as 2,
+        policyVersion: p.policyVersion,
+        tokenId,
+        issuedPublicSupplyAtoms: BigInt(p.issuedSupplyAtoms),
+        backingSats: BigInt(p.backingSats),
+        curveStage: p.curveStage,
+      },
+      stateHash: p.stateHash,
+      input: {
+        txid: p.txid,
+        vout: p.vout,
+        script: Buffer.from(p.script, "hex"),
+        valueSats: BigInt(p.valueSats),
+      },
+      indexedHeight: observation.indexedHeight,
+      indexedBlockHash: observation.indexedHash,
+    };
   }
   private async loadConfirmedBacking(tokenId: string): Promise<BackingRow> {
     const rows = await this.db
@@ -448,19 +544,88 @@ export class V3AppService {
   ): Promise<BackingRow> {
     let tip = confirmed;
     const visited: string[] = [];
+    const cursor = () =>
+      this.db.execute(sql`select c.height::text as height, c.block_hash,
+      c.rebuilding, e.chain_generation::text as generation from cove_v3_cursor c
+      left join cove_observation_epochs e on e.network = c.network
+      where c.network = ${this.config.network}`);
+    const captured = (await cursor()).rows[0];
+    if (!captured || captured.rebuilding)
+      throw new AppError(
+        "STATE_CHANGED",
+        "the indexed chain is not ready for pending verification",
+      );
+    let chain;
+    try {
+      chain = await this.provider.getBlockchainInfo({ retry: false });
+    } catch {
+      throw new AppError(
+        "CORE_UNAVAILABLE",
+        "the chain tip cannot currently be observed",
+      );
+    }
+    let membership: Set<string> | undefined;
+    const readMembership = async () => {
+      try {
+        return await this.provider.getMempoolSnapshot({ retry: false });
+      } catch {
+        throw new AppError(
+          "CORE_UNAVAILABLE",
+          "the pending branch cannot currently be observed",
+        );
+      }
+    };
+    const verifyFence = async () => {
+      if (visited.length) {
+        const current = await readMembership();
+        if (visited.some((txid) => !current.has(txid)))
+          throw new AppError(
+            "STATE_CHANGED",
+            "the pending branch changed during observation",
+          );
+      }
+      let currentChain;
+      try {
+        currentChain = await this.provider.getBlockchainInfo({ retry: false });
+      } catch {
+        throw new AppError(
+          "CORE_UNAVAILABLE",
+          "the chain tip cannot currently be verified",
+        );
+      }
+      const current = (await cursor()).rows[0];
+      if (
+        currentChain.bestBlockHash !== chain.bestBlockHash ||
+        currentChain.blocks !== chain.blocks ||
+        !current ||
+        current.rebuilding ||
+        current.height !== captured.height ||
+        current.block_hash !== captured.block_hash ||
+        current.generation !== captured.generation
+      )
+        throw new AppError(
+          "STATE_CHANGED",
+          "the chain changed during pending verification",
+        );
+    };
     for (let depth = 0; depth < MAX_PENDING_BACKING_CHAIN; depth++) {
       if (
         stopAt &&
         tip.input.txid === stopAt.txid &&
         tip.input.vout === stopAt.vout
-      )
+      ) {
+        await verifyFence();
         return tip;
+      }
       let spendingTxid: string | null | undefined;
       try {
         spendingTxid = await this.provider.getMempoolSpender(
           tip.input.txid,
           tip.input.vout,
-          { retry: false, signal: AbortSignal.timeout(5000) },
+          {
+            retry: false,
+            signal: AbortSignal.timeout(5000),
+          },
         );
       } catch {
         throw new AppError(
@@ -472,12 +637,14 @@ export class V3AppService {
         txid: string;
       } | null = spendingTxid ? { txid: spendingTxid } : null;
       if (spendingTxid === undefined) {
+        membership ??= await readMembership();
         const candidates = await listSubmittedSpendsOfBacking(
           this.db,
           this.config.network,
           tokenId,
           tip.input.txid,
           tip.input.vout,
+          membership,
         );
         if (candidates.length > 64)
           throw new AppError(
@@ -486,19 +653,6 @@ export class V3AppService {
           );
         for (const candidate of candidates) {
           if (!candidate.txid) continue;
-          let accepted: boolean;
-          try {
-            accepted = await this.provider.isTransactionInMempool(
-              candidate.txid,
-              { retry: false, signal: AbortSignal.timeout(5000) },
-            );
-          } catch {
-            throw new AppError(
-              "CORE_UNAVAILABLE",
-              "the pending branch cannot currently be observed",
-            );
-          }
-          if (!accepted) continue;
           if (next)
             throw new AppError(
               "STATE_CHANGED",
@@ -513,6 +667,7 @@ export class V3AppService {
             "STATE_CHANGED",
             "the requested backing is no longer on the accepted branch; request a fresh quote",
           );
+        await verifyFence();
         let unspent;
         try {
           unspent = await this.provider.getTxout(
@@ -535,25 +690,6 @@ export class V3AppService {
             "the backing output has changed; request a fresh quote",
           );
         }
-        for (const txid of visited) {
-          let present: boolean;
-          try {
-            present = await this.provider.isTransactionInMempool(txid, {
-              retry: false,
-              signal: AbortSignal.timeout(5000),
-            });
-          } catch {
-            throw new AppError(
-              "CORE_UNAVAILABLE",
-              "the pending branch cannot currently be verified",
-            );
-          }
-          if (!present)
-            throw new AppError(
-              "STATE_CHANGED",
-              "the pending branch changed during observation",
-            );
-        }
         return tip;
       }
       visited.push(next.txid);
@@ -568,7 +704,15 @@ export class V3AppService {
           "the pending backing transaction cannot currently be verified",
         );
       }
-      const tx = bitcoin.Transaction.fromHex(raw);
+      let tx: bitcoin.Transaction;
+      try {
+        tx = bitcoin.Transaction.fromHex(raw);
+      } catch {
+        throw new AppError(
+          "STATE_CHANGED",
+          "the pending backing transaction is invalid",
+        );
+      }
       if (
         tx.getId() !== next.txid ||
         !tx.ins[0] ||
@@ -696,13 +840,7 @@ export class V3AppService {
     });
   }
   async feeRates(): Promise<FeeRates> {
-    const now = Date.now();
-    if (this.feeRatesCache && now - this.feeRatesCache.at < FEE_RATE_CACHE_MS) {
-      return this.feeRatesCache.rates;
-    }
-    const rates = await loadFeeRates(this.provider);
-    this.feeRatesCache = { at: now, rates };
-    return rates;
+    return readFeeObservation(this.db, this.config.network);
   }
   private async assetsAt(o: {
     txid: string;
@@ -928,8 +1066,11 @@ export class V3AppService {
     tokenId: string;
   }> {
     this.assertMutating();
-    await this.requireHealthy();
     const wallet = resolveWalletIdentity(walletIdentityFrom(params));
+    validateFundingCandidates(params.funding);
+    const metadataJson = validateMetadata(params.metadata);
+    if (!/^[0-9a-f]{64}$/i.test(params.nonceHex))
+      throw new AppError("TOKEN_AMOUNT_INVALID", "nonce must be 32-byte hex");
     const creatorScript = wallet.payments.scriptBuffer;
     const tokenId = computeTokenId({
       chainIdentity: this.config.chainIdentity,
@@ -939,6 +1080,7 @@ export class V3AppService {
       creatorScript,
     }).toString("hex");
     this.assertCanaryAllowed({ tokenId, walletScript: params.walletScript });
+    await this.requireHealthy();
     const { inputs: deployerInputs, minerFeeSats } =
       await this.resolveFundingAndFee({
         op: "DEPLOY",
@@ -967,7 +1109,6 @@ export class V3AppService {
     });
     const psbtBase64 = result.psbt.toBase64();
     const digest = unsignedTxDigest(result.psbt);
-    const metadataJson = validateMetadata(params.metadata);
     const session = await createTxSession(this.db, {
       network: this.config.network,
       operation: "DEPLOY",
@@ -1010,8 +1151,14 @@ export class V3AppService {
   }): Promise<{
     txid: string;
   }> {
-    this.assertEnabled();
+    this.assertMutating();
     const session = await requireTxSession(this.db, params.sessionId);
+    if (session.network !== this.config.network)
+      throw new AppError("WRONG_NETWORK", "session belongs to another network");
+    this.assertCanaryAllowed({
+      tokenId: session.tokenId ?? undefined,
+      walletScript: session.walletScript,
+    });
     if (session.operation !== "DEPLOY")
       throw new AppError("SESSION_STATE_INVALID", "session is not DEPLOY");
     if (session.status === "BROADCAST" || session.status === "CONFIRMED") {
@@ -1027,40 +1174,70 @@ export class V3AppService {
       }
       return { txid: session.txid! };
     }
-    const psbt = parsePsbt(
+    const started = await this.beginSessionSubmission(
+      session,
       params.signedPsbtBase64,
-      btcNetwork(this.config.network),
     );
-    if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
-      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
-    for (let i = 0; i < psbt.data.inputs.length; i++)
-      validateInputSignature(psbt, i);
-    psbt.finalizeAllInputs();
-    const rawTxHex = psbt.extractTransaction().toHex();
-    const validated = validateFinalizedDeployTransaction({
-      rawTxHex,
-      network: this.config.network,
-      chainIdentity: this.config.chainIdentity,
-      guardianXOnly: this.config.guardianXOnly,
-      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
-      recoveryProfile: this.config.recoveryProfile,
-      feeScript: this.config.feeScript,
-    });
-    if (!("rawTxHex" in validated))
-      throw new AppError("GUARDIAN_REJECTED", validated.reason);
-    const txid = await this.broadcast(validated);
-    await updateTxSession(this.db, session.id, { txid, status: "BROADCAST" });
-    if (session.metadataJson && session.tokenId) {
-      await upsertTokenMetadata({
-        db: this.db,
-        network: this.config.network,
-        tokenId: session.tokenId,
-        submittedByScript: session.walletScript,
-        deployTxid: txid,
-        metadata: session.metadataJson,
-      });
+    if ("txid" in started) {
+      if (session.metadataJson && session.tokenId)
+        await upsertTokenMetadata({
+          db: this.db,
+          network: this.config.network,
+          tokenId: session.tokenId,
+          submittedByScript: session.walletScript,
+          deployTxid: started.txid,
+          metadata: session.metadataJson,
+        });
+      return started;
     }
-    return { txid };
+    const { job, psbt } = started;
+    try {
+      if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
+        throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+      for (let i = 0; i < psbt.data.inputs.length; i++)
+        validateInputSignature(psbt, i);
+      psbt.finalizeAllInputs();
+      const rawTxHex = psbt.extractTransaction().toHex();
+      const validated = validateFinalizedDeployTransaction({
+        rawTxHex,
+        network: this.config.network,
+        chainIdentity: this.config.chainIdentity,
+        guardianXOnly: this.config.guardianXOnly,
+        recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+        recoveryProfile: this.config.recoveryProfile,
+        feeScript: this.config.feeScript,
+      });
+      if (!("rawTxHex" in validated))
+        throw new AppError("GUARDIAN_REJECTED", validated.reason);
+      const receipt = await this.broadcastSubmission(job, validated);
+      const txid = receipt.txid;
+      if (session.metadataJson && session.tokenId) {
+        await upsertTokenMetadata({
+          db: this.db,
+          network: this.config.network,
+          tokenId: session.tokenId,
+          submittedByScript: session.walletScript,
+          deployTxid: txid,
+          metadata: session.metadataJson,
+        });
+      }
+      return receipt;
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        [
+          "GUARDIAN_REJECTED",
+          "STATE_CHANGED",
+          "PSBT_MUTATED",
+          "WALLET_SIGNATURE_INVALID",
+        ].includes(error.code)
+      ) {
+        await haltSubmission(this.db, job).catch(() => {});
+      }
+      throw this.submissionError(error);
+    } finally {
+      await deferSubmission(this.db, job).catch(() => {});
+    }
   }
   mintLimits(): {
     maxMintAtoms: bigint;
@@ -1090,7 +1267,7 @@ export class V3AppService {
     maxGrossSats: bigint | null;
     minSpendSats: bigint | null;
   }> {
-    const backing = await this.loadBacking(tokenId);
+    const backing = await this.loadQuoteBacking(tokenId);
     const supplyTokens =
       backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN;
     const remaining =
@@ -1190,7 +1367,7 @@ export class V3AppService {
         "TOKEN_AMOUNT_INVALID",
         "backing buy requires whole 1,000-token lots",
       );
-    const backing = await this.loadBacking(tokenId);
+    const backing = await this.loadQuoteBacking(tokenId);
     const supply = backing.state.issuedPublicSupplyAtoms;
     if (supply + amountAtoms > PUBLIC_SUPPLY_ATOMS)
       throw new AppError("TOKEN_AMOUNT_INVALID", "exceeds public cap");
@@ -1221,11 +1398,6 @@ export class V3AppService {
       this.config.buyFeeFlatSats,
     );
     const next = applyMintV2(backing.state, amountAtoms).nextState;
-    const cursor = await this.db
-      .select()
-      .from(schema.coveV3Cursor)
-      .where(eq(schema.coveV3Cursor.network, this.config.network));
-    const c = cursor[0];
     return {
       tokenId,
       amountAtoms,
@@ -1239,9 +1411,9 @@ export class V3AppService {
       feeSats: fee,
       creatorFeeSats: creatorFeeSats(gross),
       feeBps: this.config.buyFeeBps,
-      indexedHeight: c?.height ?? 0n,
-      indexedBlockHash: c?.blockHash ?? "",
-      expiresAtHeight: (c?.height ?? 0n) + 2n,
+      indexedHeight: backing.indexedHeight,
+      indexedBlockHash: backing.indexedBlockHash,
+      expiresAtHeight: backing.indexedHeight + 2n,
     };
   }
   async buildBackingBuy(params: {
@@ -1270,12 +1442,36 @@ export class V3AppService {
     intent: IntentV3;
   }> {
     this.assertMutating();
-    await this.requireHealthy();
+    this.validateTokenAmount(
+      params.tokenId,
+      params.amountAtoms,
+      LOT_TOKENS * ATOMS_PER_TOKEN,
+    );
+    if (params.amountAtoms > this.mintLimits().maxMintAtoms)
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "exceeds the per-mint token limit",
+      );
     this.assertCanaryAllowed({
       tokenId: params.tokenId,
       walletScript: params.walletScript,
     });
     const wallet = resolveWalletIdentity(walletIdentityFrom(params));
+    validateFundingCandidates(params.funding);
+    const binding = params.quoteBinding;
+    if (
+      !binding ||
+      !/^[0-9a-f]{64}$/i.test(binding.stateHash) ||
+      !binding.backingOutpoint ||
+      !/^[0-9a-f]{64}$/i.test(binding.backingOutpoint.txid) ||
+      binding.backingOutpoint.vout !== 1 ||
+      (binding.expiresAtHeight !== null &&
+        (typeof binding.expiresAtHeight !== "bigint" ||
+          binding.expiresAtHeight < 0n))
+    )
+      throw new AppError("QUOTE_STALE", "invalid quote binding");
+    await this.loadConfirmedBacking(params.tokenId);
+    await this.requireHealthy();
     const backing = await this.loadBacking(params.tokenId);
     if (
       backing.stateHash !== params.quoteBinding.stateHash ||
@@ -1406,71 +1602,108 @@ export class V3AppService {
   }): Promise<{
     txid: string;
   }> {
-    this.assertEnabled();
+    this.assertMutating();
     const session = await requireTxSession(this.db, params.sessionId);
+    if (session.network !== this.config.network)
+      throw new AppError("WRONG_NETWORK", "session belongs to another network");
+    this.assertCanaryAllowed({
+      tokenId: session.tokenId ?? undefined,
+      walletScript: session.walletScript,
+    });
     if (session.operation !== "BACKING_BUY")
       throw new AppError("SESSION_STATE_INVALID", "session is not BACKING_BUY");
     if (session.status === "BROADCAST" || session.status === "CONFIRMED")
       return { txid: session.txid! };
-    const psbt = parsePsbt(
+    const started = await this.beginSessionSubmission(
+      session,
       params.signedPsbtBase64,
-      btcNetwork(this.config.network),
     );
-    if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
-      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
-    for (let i = 1; i < psbt.data.inputs.length; i++) {
-      validateInputSignature(psbt, i);
-      psbt.finalizeInput(i);
-    }
-    const view = this.overlayPendingBacking(
-      await this.loadView(session.tokenId!),
-      session.tokenId!,
-      await this.loadBackingAt(
+    if ("txid" in started) return started;
+    const { job, psbt } = started;
+    try {
+      if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
+        throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+      for (let i = 1; i < psbt.data.inputs.length; i++) {
+        validateInputSignature(psbt, i);
+        psbt.finalizeInput(i);
+      }
+      const view = this.overlayPendingBacking(
+        await this.loadView(session.tokenId!),
         session.tokenId!,
-        session.backingTxid,
-        session.backingVout,
-      ),
-    );
-    const discoveryTicker = this.config.discoveryEnvelope
-      ? (await getV3TokenDetail(this.db, this.config.network, session.tokenId!))
-          ?.ticker
-      : undefined;
-    const signed = await this.transitionSigner.signMint({
-      psbt,
-      view,
-      network: this.config.network,
-      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
-      recoveryProfile: this.config.recoveryProfile,
-      feeScript: this.config.feeScript,
-      maxMinerFeeSats: this.config.maxMinerFeeSats,
-      buyFeeBps: this.config.buyFeeBps,
-      buyFeeFlatSats: this.config.buyFeeFlatSats,
-      discoveryTicker,
-      fundingChecker: this.fundingChecker,
-    });
-    if (!signed.ok)
-      throw new AppError(
-        "GUARDIAN_REJECTED",
-        `${signed.reason}: ${signed.detail}`,
+        await this.loadBackingAt(
+          session.tokenId!,
+          session.backingTxid,
+          session.backingVout,
+        ),
       );
-    const rawTxHex = psbt.extractTransaction().toHex();
-    const validated = await validateFinalizedMintTransaction({
-      rawTxHex,
-      view,
-      network: this.config.network,
-      guardianXOnly: this.config.guardianXOnly,
-      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
-      recoveryProfile: this.config.recoveryProfile,
-      feeScript: this.config.feeScript,
-      maxMinerFeeSats: this.config.maxMinerFeeSats,
-      buyFeeBps: this.config.buyFeeBps,
-      buyFeeFlatSats: this.config.buyFeeFlatSats,
-    });
-    if (!("rawTxHex" in validated))
-      throw new AppError("GUARDIAN_REJECTED", validated.reason);
-    const txid = await this.broadcast(validated);
-    await updateTxSession(this.db, session.id, { txid, status: "BROADCAST" });
-    return { txid };
+      const discoveryTicker = this.config.discoveryEnvelope
+        ? (
+            await getV3TokenDetail(
+              this.db,
+              this.config.network,
+              session.tokenId!,
+            )
+          )?.ticker
+        : undefined;
+      const signed = await this.transitionSigner.signMint({
+        psbt,
+        view,
+        network: this.config.network,
+        recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+        recoveryProfile: this.config.recoveryProfile,
+        feeScript: this.config.feeScript,
+        maxMinerFeeSats: this.config.maxMinerFeeSats,
+        buyFeeBps: this.config.buyFeeBps,
+        buyFeeFlatSats: this.config.buyFeeFlatSats,
+        discoveryTicker,
+        fundingChecker: this.fundingChecker,
+      });
+      if (!signed.ok) {
+        const transient = [
+          "GUARDIAN_TIMEOUT",
+          "REMOTE_GUARDIAN_UNAVAILABLE",
+          "FUNDING_CHECK_UNAVAILABLE",
+          "AUDIT_PERSISTENCE_FAILED",
+          "SIGNING_FAILED",
+        ].includes(signed.reason);
+        throw new AppError(
+          transient ? "CORE_UNAVAILABLE" : "GUARDIAN_REJECTED",
+          `${signed.reason}: ${signed.detail}`,
+        );
+      }
+      const rawTxHex = psbt.extractTransaction().toHex();
+      const validated = await validateFinalizedMintTransaction({
+        rawTxHex,
+        view,
+        network: this.config.network,
+        guardianXOnly: this.config.guardianXOnly,
+        recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+        recoveryProfile: this.config.recoveryProfile,
+        feeScript: this.config.feeScript,
+        maxMinerFeeSats: this.config.maxMinerFeeSats,
+        buyFeeBps: this.config.buyFeeBps,
+        buyFeeFlatSats: this.config.buyFeeFlatSats,
+      });
+      if (!("rawTxHex" in validated))
+        throw new AppError("GUARDIAN_REJECTED", validated.reason);
+      const receipt = await this.broadcastSubmission(job, validated);
+      return receipt;
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        [
+          "GUARDIAN_REJECTED",
+          "STATE_CHANGED",
+          "PSBT_MUTATED",
+          "WALLET_SIGNATURE_INVALID",
+        ].includes(error.code)
+      ) {
+        await haltSubmission(this.db, job).catch(() => {});
+      }
+      throw this.submissionError(error);
+    } finally {
+      await deferSubmission(this.db, job).catch(() => {});
+    }
   }
   async quoteRedeem(
     tokenId: string,
@@ -1481,7 +1714,7 @@ export class V3AppService {
         "TOKEN_AMOUNT_INVALID",
         "redeem requires whole display tokens",
       );
-    const backing = await this.loadBacking(tokenId);
+    const backing = await this.loadQuoteBacking(tokenId);
     const gross = grossRedeem(
       backing.state.issuedPublicSupplyAtoms / ATOMS_PER_TOKEN,
       amountAtoms / ATOMS_PER_TOKEN,
@@ -1529,13 +1762,18 @@ export class V3AppService {
     intent: IntentV3;
   }> {
     this.assertMutating();
-    await this.requireHealthy();
+    this.validateTokenAmount(
+      params.tokenId,
+      params.amountAtoms,
+      LOT_TOKENS * ATOMS_PER_TOKEN,
+    );
     this.assertCanaryAllowed({
       tokenId: params.tokenId,
       walletScript: params.walletScript,
     });
     const wallet = resolveWalletIdentity(walletIdentityFrom(params));
-    const backing = await this.loadBacking(params.tokenId);
+    validateFundingCandidates(params.funding ?? []);
+    await this.loadConfirmedBacking(params.tokenId);
     const tokenUtxos = await getTokenUtxosByScriptDb(
       this.db,
       this.config.network,
@@ -1570,6 +1808,8 @@ export class V3AppService {
           `or redeem a smaller amount.`,
       );
     }
+    await this.requireHealthy();
+    const backing = await this.loadBacking(params.tokenId);
     const tokenInputs: ResolvedInput[] = selected.map((u) => ({
       txid: u.txid,
       vout: u.vout,
@@ -1700,70 +1940,102 @@ export class V3AppService {
   }): Promise<{
     txid: string;
   }> {
-    this.assertEnabled();
+    this.assertMutating();
     const session = await requireTxSession(this.db, params.sessionId);
+    if (session.network !== this.config.network)
+      throw new AppError("WRONG_NETWORK", "session belongs to another network");
+    this.assertCanaryAllowed({
+      tokenId: session.tokenId ?? undefined,
+      walletScript: session.walletScript,
+    });
     if (session.operation !== "REDEEM")
       throw new AppError("SESSION_STATE_INVALID", "session is not REDEEM");
     if (session.status === "BROADCAST" || session.status === "CONFIRMED")
       return { txid: session.txid! };
-    const psbt = parsePsbt(
+    const started = await this.beginSessionSubmission(
+      session,
       params.signedPsbtBase64,
-      btcNetwork(this.config.network),
     );
-    if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
-      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
-    for (let i = 1; i < psbt.data.inputs.length; i++) {
-      validateInputSignature(psbt, i);
-      psbt.finalizeInput(i);
-    }
-    const spent = psbt.txInputs.map((i) => ({
-      txid: Buffer.from(i.hash).reverse().toString("hex"),
-      vout: i.index,
-    }));
-    const view = this.overlayPendingBacking(
-      await this.loadView(session.tokenId!, spent),
-      session.tokenId!,
-      await this.loadBackingAt(
+    if ("txid" in started) return started;
+    const { job, psbt } = started;
+    try {
+      if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
+        throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+      for (let i = 1; i < psbt.data.inputs.length; i++) {
+        validateInputSignature(psbt, i);
+        psbt.finalizeInput(i);
+      }
+      const spent = psbt.txInputs.map((i) => ({
+        txid: Buffer.from(i.hash).reverse().toString("hex"),
+        vout: i.index,
+      }));
+      const view = this.overlayPendingBacking(
+        await this.loadView(session.tokenId!, spent),
         session.tokenId!,
-        session.backingTxid,
-        session.backingVout,
-      ),
-    );
-    const signed = await this.transitionSigner.signRedeem({
-      psbt,
-      view,
-      network: this.config.network,
-      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
-      recoveryProfile: this.config.recoveryProfile,
-      feeScript: this.config.feeScript,
-      maxMinerFeeSats: this.config.maxMinerFeeSats,
-      redeemFeeBps: this.config.redeemFeeBps,
-      redeemFeeFlatSats: this.config.redeemFeeFlatSats,
-      fundingChecker: this.fundingChecker,
-    });
-    if (!signed.ok)
-      throw new AppError(
-        "GUARDIAN_REJECTED",
-        `${signed.reason}: ${signed.detail}`,
+        await this.loadBackingAt(
+          session.tokenId!,
+          session.backingTxid,
+          session.backingVout,
+        ),
       );
-    const rawTxHex = psbt.extractTransaction().toHex();
-    const validated = await validateFinalizedRedeemTransaction({
-      rawTxHex,
-      view,
-      network: this.config.network,
-      guardianXOnly: this.config.guardianXOnly,
-      recoveryKeyXOnly: this.config.recoveryKeyXOnly,
-      recoveryProfile: this.config.recoveryProfile,
-      feeScript: this.config.feeScript,
-      maxMinerFeeSats: this.config.maxMinerFeeSats,
-      redeemFeeBps: this.config.redeemFeeBps,
-      redeemFeeFlatSats: this.config.redeemFeeFlatSats,
-    });
-    if (!("rawTxHex" in validated))
-      throw new AppError("GUARDIAN_REJECTED", validated.reason);
-    const txid = await this.broadcast(validated);
-    await updateTxSession(this.db, session.id, { txid, status: "BROADCAST" });
-    return { txid };
+      const signed = await this.transitionSigner.signRedeem({
+        psbt,
+        view,
+        network: this.config.network,
+        recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+        recoveryProfile: this.config.recoveryProfile,
+        feeScript: this.config.feeScript,
+        maxMinerFeeSats: this.config.maxMinerFeeSats,
+        redeemFeeBps: this.config.redeemFeeBps,
+        redeemFeeFlatSats: this.config.redeemFeeFlatSats,
+        fundingChecker: this.fundingChecker,
+      });
+      if (!signed.ok) {
+        const transient = [
+          "GUARDIAN_TIMEOUT",
+          "REMOTE_GUARDIAN_UNAVAILABLE",
+          "FUNDING_CHECK_UNAVAILABLE",
+          "AUDIT_PERSISTENCE_FAILED",
+          "SIGNING_FAILED",
+        ].includes(signed.reason);
+        throw new AppError(
+          transient ? "CORE_UNAVAILABLE" : "GUARDIAN_REJECTED",
+          `${signed.reason}: ${signed.detail}`,
+        );
+      }
+      const rawTxHex = psbt.extractTransaction().toHex();
+      const validated = await validateFinalizedRedeemTransaction({
+        rawTxHex,
+        view,
+        network: this.config.network,
+        guardianXOnly: this.config.guardianXOnly,
+        recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+        recoveryProfile: this.config.recoveryProfile,
+        feeScript: this.config.feeScript,
+        maxMinerFeeSats: this.config.maxMinerFeeSats,
+        redeemFeeBps: this.config.redeemFeeBps,
+        redeemFeeFlatSats: this.config.redeemFeeFlatSats,
+      });
+      if (!("rawTxHex" in validated))
+        throw new AppError("GUARDIAN_REJECTED", validated.reason);
+      const receipt = await this.broadcastSubmission(job, validated);
+      return receipt;
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        [
+          "GUARDIAN_REJECTED",
+          "STATE_CHANGED",
+          "PSBT_MUTATED",
+          "WALLET_SIGNATURE_INVALID",
+        ].includes(error.code)
+      ) {
+        await haltSubmission(this.db, job).catch(() => {});
+      }
+      throw this.submissionError(error);
+    } finally {
+      await deferSubmission(this.db, job).catch(() => {});
+    }
   }
   async buildTransfer(params: {
     tokenId: string;
@@ -1784,8 +2056,17 @@ export class V3AppService {
     intent: IntentV3;
   }> {
     this.assertMutating();
-    await this.requireHealthy();
+    this.validateTokenAmount(params.tokenId, params.amountAtoms);
     const wallet = resolveWalletIdentity(walletIdentityFrom(params));
+    validateFundingCandidates(params.funding);
+    if (
+      !/^(?:0014[0-9a-f]{40}|5120[0-9a-f]{64})$/i.test(params.recipientScript)
+    )
+      throw new AppError(
+        "TOKEN_AMOUNT_INVALID",
+        "recipient must be a token carrier script",
+      );
+    await this.loadConfirmedBacking(params.tokenId);
     const tokenUtxos = await getTokenUtxosByScriptDb(
       this.db,
       this.config.network,
@@ -1820,6 +2101,7 @@ export class V3AppService {
           `yourself, or send a smaller amount.`,
       );
     }
+    await this.requireHealthy();
     const tokenInputs: ResolvedInput[] = selected.map((u) => ({
       txid: u.txid,
       vout: u.vout,
@@ -1912,170 +2194,156 @@ export class V3AppService {
   }): Promise<{
     txid: string;
   }> {
-    this.assertEnabled();
+    this.assertMutating();
     const session = await requireTxSession(this.db, params.sessionId);
+    if (session.network !== this.config.network)
+      throw new AppError("WRONG_NETWORK", "session belongs to another network");
+    this.assertCanaryAllowed({
+      tokenId: session.tokenId ?? undefined,
+      walletScript: session.walletScript,
+    });
     if (session.operation !== "TRANSFER")
       throw new AppError("SESSION_STATE_INVALID", "session is not TRANSFER");
     if (session.status === "BROADCAST" || session.status === "CONFIRMED")
       return { txid: session.txid! };
-    const psbt = parsePsbt(
+    const started = await this.beginSessionSubmission(
+      session,
       params.signedPsbtBase64,
-      btcNetwork(this.config.network),
     );
-    if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
-      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
-    for (let i = 0; i < psbt.data.inputs.length; i++)
-      validateInputSignature(psbt, i);
-    psbt.finalizeAllInputs();
-    const rawTxHex = psbt.extractTransaction().toHex();
-    const view = this.overlayPendingBacking(
-      await this.loadView(session.tokenId!),
-      session.tokenId!,
-      await this.loadBackingAt(
+    if ("txid" in started) return started;
+    const { job, psbt } = started;
+    try {
+      if (unsignedTxDigest(psbt) !== session.unsignedTxDigest)
+        throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+      for (let i = 0; i < psbt.data.inputs.length; i++)
+        validateInputSignature(psbt, i);
+      psbt.finalizeAllInputs();
+      const rawTxHex = psbt.extractTransaction().toHex();
+      const view = this.overlayPendingBacking(
+        await this.loadView(
+          session.tokenId!,
+          psbt.txInputs.map((i) => ({
+            txid: Buffer.from(i.hash).reverse().toString("hex"),
+            vout: i.index,
+          })),
+        ),
         session.tokenId!,
-        session.backingTxid,
-        session.backingVout,
-      ),
-    );
-    const validated = validateFinalizedTransferTransaction({
-      rawTxHex,
-      view,
-      maxMinerFeeSats: this.config.maxMinerFeeSats,
-    });
-    if (!("rawTxHex" in validated))
-      throw new AppError("GUARDIAN_REJECTED", validated.reason);
-    const txid = await this.broadcast(validated);
-    await updateTxSession(this.db, session.id, { txid, status: "BROADCAST" });
-    return { txid };
+        await this.loadBackingAt(
+          session.tokenId!,
+          session.backingTxid,
+          session.backingVout,
+        ),
+      );
+      const validated = validateFinalizedTransferTransaction({
+        rawTxHex,
+        view,
+        maxMinerFeeSats: this.config.maxMinerFeeSats,
+      });
+      if (!("rawTxHex" in validated))
+        throw new AppError("GUARDIAN_REJECTED", validated.reason);
+      const receipt = await this.broadcastSubmission(job, validated);
+      return receipt;
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        [
+          "GUARDIAN_REJECTED",
+          "STATE_CHANGED",
+          "PSBT_MUTATED",
+          "WALLET_SIGNATURE_INVALID",
+        ].includes(error.code)
+      ) {
+        await haltSubmission(this.db, job).catch(() => {});
+      }
+      throw this.submissionError(error);
+    } finally {
+      await deferSubmission(this.db, job).catch(() => {});
+    }
   }
   async txStatus(txid: string) {
-    const rows = await this.db
-      .select()
-      .from(schema.coveV3AppTransactions)
-      .where(
-        and(
-          eq(schema.coveV3AppTransactions.network, this.config.network),
-          eq(schema.coveV3AppTransactions.txid, txid),
-        ),
-      );
-    const session = rows[0] ?? null;
-    const evRows = await this.db
-      .select()
-      .from(schema.coveV3Events)
-      .where(
-        and(
-          eq(schema.coveV3Events.network, this.config.network),
-          eq(schema.coveV3Events.txid, txid),
-          eq(schema.coveV3Events.canonical, true),
-        ),
-      );
-    const confirmedHeight = evRows[0]?.blockHeight ?? null;
-    const publicSession = session
+    const result = await this.db
+      .execute(sql`select s.status as session_status, e.block_height::text as confirmed_height,
+      e.block_hash as confirmed_hash, e.created_at as confirmed_at, o.state as observed_state, o.observed_at,
+      (${indexedBackingConflictQuery(this.config.network, txid)}) as conflict,
+      (o.chain_generation = g.chain_generation and not c.rebuilding and r.core_reachable
+        and r.core_height = c.height and r.core_tip = c.block_hash and r.chain_observed_at >= clock_timestamp() - interval '30 seconds'
+        and o.observed_at >= clock_timestamp() - interval '15 seconds') as fresh
+      from (select ${this.config.network}::text as network, ${txid}::text as txid) q
+      left join lateral (select status from cove_v3_app_transactions where network = q.network and txid = q.txid limit 1) s on true
+      left join lateral (select block_height, block_hash, created_at from cove_v3_events where network = q.network and txid = q.txid and canonical and valid limit 1) e on true
+      left join cove_transaction_observations o on o.network = q.network and o.txid = q.txid
+      left join cove_observation_epochs g on g.network = q.network
+      left join cove_v3_cursor c on c.network = q.network
+      left join cove_v3_runtime r on r.network = q.network`);
+    const row = result.rows[0];
+    const confirmedHeight =
+      row?.confirmed_height == null
+        ? null
+        : BigInt(String(row.confirmed_height));
+    const session = row?.session_status
       ? {
           status:
-            session.status === "CONFIRMED" && confirmedHeight === null
+            row.session_status === "CONFIRMED" && confirmedHeight === null
               ? "REORGED"
-              : session.status,
+              : String(row.session_status),
         }
       : null;
-    if (confirmedHeight !== null)
-      return {
-        txid,
-        session: publicSession,
-        state: "confirmed" as const,
-        mempool: false,
-        confirmedHeight,
-        confirmedBlockHash: evRows[0]?.blockHash ?? null,
-        observedAt: evRows[0]?.createdAt?.toISOString() ?? null,
-        stale: false,
-      };
     const unknown = {
       txid,
-      session: publicSession,
-      state: "unknown" as const,
-      mempool: null,
-      confirmedHeight: null,
-      confirmedBlockHash: null,
-      observedAt: null,
+      session,
+      state: "unknown" as string,
+      mempool: null as boolean | null,
+      confirmedHeight: null as bigint | null,
+      confirmedBlockHash: null as string | null,
+      observedAt: null as string | null,
       stale: true,
     };
-    if (
-      session?.backingVout === 1 &&
-      (await indexedBackingConflict(this.db, this.config.network, txid))
-    ) {
+    if (confirmedHeight !== null)
       return {
         ...unknown,
-        session: { status: "CONFLICTED" },
-        state: "conflicted" as const,
+        state: "confirmed",
         mempool: false,
-        observedAt: new Date().toISOString(),
+        confirmedHeight,
+        confirmedBlockHash: String(row!.confirmed_hash),
+        observedAt: databaseDate(row!.confirmed_at)?.toISOString() ?? null,
         stale: false,
       };
-    }
-    if (!session) {
-      const fills = await this.db
-        .select({ id: schema.coveV3MarketFills.id })
-        .from(schema.coveV3MarketFills)
-        .where(
-          and(
-            eq(schema.coveV3MarketFills.network, this.config.network),
-            eq(schema.coveV3MarketFills.txid, txid),
-          ),
-        )
-        .limit(1);
-      if (fills.length === 0) return unknown;
-    }
-    try {
-      const observation = await this.provider.observeTransaction(txid, {
-        signal: AbortSignal.timeout(5000),
-        retry: false,
-      });
-      if (observation.state === "unknown") return unknown;
+    if (row?.conflict === true)
       return {
         ...unknown,
-        state:
-          observation.state === "mempool"
-            ? ("pending" as const)
-            : ("mined" as const),
-        mempool: observation.state === "mempool",
-        observedAt: new Date().toISOString(),
+        session: session ? { status: "CONFLICTED" } : null,
+        state: "conflicted",
+        mempool: false,
         stale: false,
       };
-    } catch {
-      return unknown;
-    }
+    if (row?.fresh !== true) return unknown;
+    return {
+      ...unknown,
+      state: row.observed_state === "pending" ? "pending" : "unknown",
+      mempool: row.observed_state === "pending" ? true : null,
+      observedAt: databaseDate(row.observed_at)?.toISOString() ?? null,
+      stale: false,
+    };
   }
   async reconcileAppSessions(): Promise<{
     confirmed: number;
   }> {
-    let confirmed = 0;
-    const pending = await this.db
-      .select()
-      .from(schema.coveV3AppTransactions)
-      .where(
-        and(
-          eq(schema.coveV3AppTransactions.network, this.config.network),
-          eq(schema.coveV3AppTransactions.status, "BROADCAST"),
-        ),
-      );
-    for (const s of pending) {
-      if (!s.txid) continue;
-      const ev = await this.db
-        .select()
-        .from(schema.coveV3Events)
-        .where(
-          and(
-            eq(schema.coveV3Events.network, this.config.network),
-            eq(schema.coveV3Events.txid, s.txid),
-            eq(schema.coveV3Events.canonical, true),
-          ),
-        );
-      if (ev.length > 0) {
-        await updateTxSession(this.db, s.id, { status: "CONFIRMED" });
-        confirmed++;
-      }
-    }
-    return { confirmed };
+    return this.db.transaction(async (tx) => {
+      const confirmed =
+        await tx.execute(sql`update cove_v3_app_transactions s set status = 'CONFIRMED', updated_at = clock_timestamp()
+        where s.network = ${this.config.network} and s.id in (
+          select p.id from cove_v3_app_transactions p where p.network = ${this.config.network}
+          and p.status in ('BROADCAST','REORGED') and exists (
+            select 1 from cove_v3_events e where e.network = p.network and e.txid = p.txid and e.canonical and e.valid) limit 200)
+        and s.status in ('BROADCAST','REORGED') returning s.id`);
+      await tx.execute(sql`update cove_v3_app_transactions s set status = 'REORGED', updated_at = clock_timestamp()
+        where s.network = ${this.config.network} and s.id in (
+          select p.id from cove_v3_app_transactions p where p.network = ${this.config.network} and p.status = 'CONFIRMED'
+          and not exists (select 1 from cove_v3_events e where e.network = p.network and e.txid = p.txid and e.canonical and e.valid)
+          and exists (select 1 from cove_v3_cursor c where c.network = p.network and not c.rebuilding) limit 200)
+        and s.status = 'CONFIRMED'`);
+      return { confirmed: confirmed.rows.length };
+    });
   }
   async prepareListing(params: {
     tokenId: string;
@@ -2251,11 +2519,32 @@ export class V3AppService {
       .from(schema.coveV3MarketFills)
       .where(eq(schema.coveV3MarketFills.id, fillId));
   }
+  async publicFillStatus(fillId: string) {
+    const rows = await this.db
+      .select({
+        id: schema.coveV3MarketFills.id,
+        tokenId: schema.coveV3MarketFills.tokenId,
+        status: schema.coveV3MarketFills.status,
+        txid: schema.coveV3MarketFills.txid,
+        blockHeight: schema.coveV3MarketFills.blockHeight,
+        blockHash: schema.coveV3MarketFills.blockHash,
+        canonical: schema.coveV3MarketFills.canonical,
+        updatedAt: schema.coveV3MarketFills.updatedAt,
+      })
+      .from(schema.coveV3MarketFills)
+      .where(
+        and(
+          eq(schema.coveV3MarketFills.network, this.config.network),
+          eq(schema.coveV3MarketFills.id, fillId),
+        ),
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
   async finalizeAndBroadcastFill(fillId: string): Promise<{
     txid: string;
   }> {
     this.assertMutating();
-    await this.requireHealthy();
     const fills = await this.getFill(fillId);
     const fill = fills[0];
     if (!fill) throw new AppError("STATE_CHANGED", "fill not found");
@@ -2263,8 +2552,14 @@ export class V3AppService {
       tokenId: fill.tokenId,
       walletScript: fill.buyerTokenScript,
     });
-    const validated = await this.market.finalizeP2PFill(fillId);
-    return this.market.broadcastP2PFill(validated);
+    if (
+      !["BUYER_SIGNED", "SUBMITTING", "BROADCAST", "CONFIRMED"].includes(
+        fill.status,
+      )
+    )
+      throw new AppError("STATE_CHANGED", `fill is ${fill.status}`);
+    const observation = await this.requireHealthy();
+    return this.market.completeFill(fillId, observation);
   }
   getBuyRoutes(tokenId: string, amountAtoms: bigint) {
     return getBuyRoutes(this.db, this.config.network, tokenId, amountAtoms, {
@@ -2315,40 +2610,269 @@ export class V3AppService {
       .limit(limit);
     return rows.map((r) => ({ ...publicListing(r.listing), ticker: r.ticker }));
   }
-  private async broadcast(
-    validated: ValidatedCoveTransaction,
-  ): Promise<string> {
-    const accept = await this.provider.testMempoolAccept(validated.rawTxHex);
-    if (!accept.allowed)
-      throw new AppError(
-        "MEMPOOL_REJECTED",
-        accept.rejectReason ?? "testmempoolaccept rejected",
+  private submissionError(error: unknown): Error {
+    if (error instanceof SubmissionError)
+      return new AppError(
+        error.code === "CONFLICT" ? "PSBT_MUTATED" : "CORE_UNAVAILABLE",
+        error.message,
       );
-    const txid = await this.provider.broadcastTransaction(validated.rawTxHex);
-    if (txid !== validated.txid)
-      throw new AppError("BROADCAST_FAILED", "broadcast txid mismatch");
-    return txid;
+    return error instanceof Error ? error : new Error("submission failed");
   }
-  async publicFillStatus(fillId: string) {
-    const rows = await this.db
-      .select({
-        id: schema.coveV3MarketFills.id,
-        tokenId: schema.coveV3MarketFills.tokenId,
-        status: schema.coveV3MarketFills.status,
-        txid: schema.coveV3MarketFills.txid,
-        blockHeight: schema.coveV3MarketFills.blockHeight,
-        blockHash: schema.coveV3MarketFills.blockHash,
-        canonical: schema.coveV3MarketFills.canonical,
-        updatedAt: schema.coveV3MarketFills.updatedAt,
-      })
-      .from(schema.coveV3MarketFills)
+  private async beginSessionSubmission(
+    session: TxSessionRow,
+    signedPsbtBase64: string,
+  ): Promise<
+    | {
+        job: Submission;
+        psbt: bitcoin.Psbt;
+      }
+    | {
+        txid: string;
+        submissionState: "saved" | "broadcast";
+      }
+  > {
+    const incoming = parsePsbt(
+      signedPsbtBase64,
+      btcNetwork(this.config.network),
+    );
+    if (unsignedTxDigest(incoming) !== session.unsignedTxDigest)
+      throw new AppError("PSBT_MUTATED", "unsigned tx digest changed");
+    const first =
+      session.operation === "BACKING_BUY" || session.operation === "REDEEM"
+        ? 1
+        : 0;
+    for (let i = first; i < incoming.data.inputs.length; i++)
+      validateInputSignature(incoming, i);
+    let job: Submission | undefined;
+    try {
+      const prepared = await prepareSubmission(this.db, {
+        network: session.network,
+        sourceKind: "APP",
+        sourceId: session.id,
+        operation: session.operation,
+        tokenId: session.tokenId,
+        backingTxid: session.backingTxid,
+        backingVout: session.backingVout,
+        unsignedTxDigest: session.unsignedTxDigest!,
+        walletPsbtBase64: signedPsbtBase64,
+      });
+      if (prepared.phase === "BROADCAST")
+        return { txid: prepared.txid!, submissionState: "broadcast" };
+      if (prepared.phase === "RECOVERY_REQUIRED")
+        await resumeSubmission(this.db, prepared.id);
+      job = await claimSubmission(this.db, prepared.id);
+      if (job.phase === "READY") {
+        try {
+          return await this.broadcastSubmission(job);
+        } finally {
+          await deferSubmission(this.db, job).catch(() => {});
+        }
+      }
+      return {
+        job,
+        psbt: parsePsbt(job.walletPsbtBase64, btcNetwork(this.config.network)),
+      };
+    } catch (error) {
+      if (job) await deferSubmission(this.db, job).catch(() => {});
+      throw this.submissionError(error);
+    }
+  }
+  private async broadcastSubmission(
+    job: Submission,
+    validated?: ValidatedCoveTransaction,
+  ): Promise<{
+    txid: string;
+    submissionState: "saved" | "broadcast";
+  }> {
+    if (job.phase === "SIGNING") {
+      if (!validated)
+        throw new AppError(
+          "STATE_CHANGED",
+          "submission has not been validated",
+        );
+      job = await saveSignedSubmission(this.db, job, {
+        rawTxHex: validated.rawTxHex,
+        txid: validated.txid,
+      });
+    }
+    if (!job.rawTxHex || !job.txid)
+      throw new AppError("STATE_CHANGED", "submission has no signed bytes");
+    const conflict = await this.db.execute(sql`update cove_v3_submissions s set
+      conflicted = (${indexedBackingConflictQuery(job.network, job.txid)}), conflict_generation = e.chain_generation
+      from cove_observation_epochs e where s.id = ${job.id}::uuid and e.network = s.network and s.phase = 'READY' returning s.conflicted`);
+    if (conflict.rows[0]?.conflicted === true)
+      return { txid: job.txid, submissionState: "saved" };
+    const confirmed = await this.db
+      .select({ txid: schema.coveV3Events.txid })
+      .from(schema.coveV3Events)
       .where(
         and(
-          eq(schema.coveV3MarketFills.network, this.config.network),
-          eq(schema.coveV3MarketFills.id, fillId),
+          eq(schema.coveV3Events.network, job.network),
+          eq(schema.coveV3Events.txid, job.txid),
+          eq(schema.coveV3Events.canonical, true),
         ),
       )
       .limit(1);
-    return rows[0] ?? null;
+    const advance =
+      job.tokenId && job.backingVout === 1
+        ? await acceptedObservationCandidate(this.db, job.network, job.tokenId)
+        : null;
+    let acceptedPayload = null;
+    if (
+      advance &&
+      advance.payload.txid === job.backingTxid &&
+      advance.payload.vout === job.backingVout
+    ) {
+      try {
+        const raw = bitcoin.Transaction.fromHex(job.rawTxHex),
+          wire = decodeCoveOpReturnTx(raw),
+          p = advance.payload;
+        const state: CoveStateV2 = {
+          stateVersion: p.stateVersion as 2,
+          policyVersion: p.policyVersion,
+          tokenId: p.tokenId,
+          issuedPublicSupplyAtoms: BigInt(p.issuedSupplyAtoms),
+          backingSats: BigInt(p.backingSats),
+          curveStage: p.curveStage,
+        };
+        if (
+          (wire.op !== OP_MINT && wire.op !== OP_REDEEM) ||
+          wire.tokenId.toString("hex") !== p.tokenId ||
+          raw.getId() !== job.txid
+        )
+          throw new Error("Wrong accepted operation");
+        const next =
+          wire.op === OP_MINT
+            ? applyMintV2(state, wire.amount).nextState
+            : applyRedeemV2(state, wire.redeemAmount).nextState;
+        const vault = buildBackingVaultV3({
+          state: next,
+          guardianXOnly: this.config.guardianXOnly,
+          recoveryKeyXOnly: this.config.recoveryKeyXOnly,
+          recoveryProfile: this.config.recoveryProfile,
+          network: btcNetwork(this.config.network),
+        });
+        if (
+          !raw.outs[1]?.script.equals(vault.scriptPubKey) ||
+          BigInt(raw.outs[1]!.value) !== RESERVE_ANCHOR_SATS + next.backingSats
+        )
+          throw new Error("Wrong accepted vault");
+        acceptedPayload = {
+          ...p,
+          txid: raw.getId(),
+          vout: 1,
+          issuedSupplyAtoms: next.issuedPublicSupplyAtoms.toString(),
+          backingSats: next.backingSats.toString(),
+          curveStage: next.curveStage,
+          stateHash: stateHashV2(next),
+          script: vault.scriptPubKey.toString("hex"),
+          valueSats: String(raw.outs[1]!.value),
+        };
+      } catch {
+        acceptedPayload = null;
+      }
+    }
+    try {
+      if (!confirmed.length) {
+        await this.requireHealthy();
+        await broadcastRecordedTransaction(
+          this.provider,
+          { rawTxHex: job.rawTxHex, txid: job.txid },
+          this.config.network,
+        );
+      }
+      await publishSubmission(this.db, job);
+      if (advance && acceptedPayload)
+        await publishAcceptedObservation(
+          this.db,
+          advance.base,
+          job.id,
+          { txid: job.backingTxid!, vout: job.backingVout! },
+          acceptedPayload,
+        ).catch(() => false);
+      return { txid: job.txid, submissionState: "broadcast" };
+    } catch {
+      return { txid: job.txid, submissionState: "saved" };
+    }
+  }
+  async reconcileSubmissionConflicts(): Promise<number> {
+    const result = await this.db
+      .execute(sql`update cove_v3_submissions s set conflicted = v.conflict,
+      conflict_generation = v.generation, next_attempt_at = case when s.conflicted and not v.conflict then clock_timestamp() else s.next_attempt_at end
+      from (select s0.id, e.chain_generation as generation, (${indexedBackingConflictQuery(this.config.network, sql`s0.txid`)}) as conflict
+        from cove_v3_submissions s0 join cove_observation_epochs e on e.network = s0.network
+        join cove_v3_cursor c on c.network = s0.network and not c.rebuilding
+        where s0.network = ${this.config.network} and s0.phase in ('SIGNING','READY') and s0.txid is not null
+          and s0.conflict_generation is distinct from e.chain_generation order by s0.id limit 200) v
+      where s.id = v.id returning s.id`);
+    return result.rows.length;
+  }
+  async recoverSubmissions(limit = 2): Promise<{
+    recovered: number;
+  }> {
+    this.assertMutating();
+    let recovered = 0;
+    for (const job of await dueSubmissions(
+      this.db,
+      this.config.network,
+      limit,
+    )) {
+      try {
+        if (job.sourceKind === "FILL") {
+          const receipt = await this.market.recoverSubmission(job);
+          if (receipt.submissionState === "broadcast") recovered++;
+          continue;
+        } else {
+          const owner = await requireTxSession(this.db, job.sourceId);
+          this.assertCanaryAllowed({
+            tokenId: owner.tokenId ?? undefined,
+            walletScript: owner.walletScript,
+          });
+          if (job.phase === "READY") {
+            const claimed = await claimSubmission(this.db, job.id);
+            try {
+              const receipt = await this.broadcastSubmission(claimed);
+              if (receipt.submissionState === "broadcast") recovered++;
+            } finally {
+              await deferSubmission(this.db, claimed).catch(() => {});
+            }
+            continue;
+          }
+          const input = {
+            sessionId: job.sourceId,
+            signedPsbtBase64: job.walletPsbtBase64,
+          };
+          if (job.operation === "DEPLOY") await this.submitLaunch(input);
+          else if (job.operation === "BACKING_BUY")
+            await this.submitBackingBuy(input);
+          else if (job.operation === "REDEEM") await this.submitRedeem(input);
+          else if (job.operation === "TRANSFER")
+            await this.submitTransfer(input);
+          else
+            throw new AppError(
+              "SESSION_STATE_INVALID",
+              "unknown saved operation",
+            );
+        }
+        if (
+          (
+            await getSubmission(
+              this.db,
+              job.network,
+              job.sourceKind,
+              job.sourceId,
+            )
+          )?.phase === "BROADCAST"
+        )
+          recovered++;
+      } catch (error) {
+        console.warn(
+          "submission recovery deferred:",
+          job.id,
+          error instanceof AppError ? error.code : "UNAVAILABLE",
+        );
+      }
+    }
+    return { recovered };
   }
 }

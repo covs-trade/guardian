@@ -148,7 +148,16 @@ export function buildGuardianService(
           : config.network,
     isCoveCarrier: async (o) =>
       (await getLiveTokenUtxosAtDb(db, config.network, [o])).length > 0,
-    assets: config.ordUrl ? ordAssetLookup(config.ordUrl) : undefined,
+    assets: config.ordUrl
+      ? ordAssetLookup(config.ordUrl, {
+          budget: new PostgresRpcBudget(
+            budgetDb,
+            `ord:${providerAccount({ url: config.ordUrl })}`,
+            "guardian",
+            3,
+          ),
+        })
+      : undefined,
   });
   const signingBackend: GuardianSigningBackend = custodySigningBackend(
     config.custodyBackend,
