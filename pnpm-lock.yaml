@@ -47,6 +47,9 @@ importers:
       '@crclaunch/cove-app':
         specifier: workspace:*
         version: link:../../packages/cove-app
+      '@crclaunch/cove-economics':
+        specifier: workspace:*
+        version: link:../../packages/cove-economics
       '@crclaunch/cove-guardian':
         specifier: workspace:*
         version: link:../../packages/cove-guardian
@@ -62,6 +65,9 @@ importers:
       '@crclaunch/cove-wire':
         specifier: workspace:*
         version: link:../../packages/cove-wire
+      '@crclaunch/crc20-curve':
+        specifier: workspace:*
+        version: link:../../packages/crc20-curve
       '@crclaunch/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -71,6 +77,9 @@ importers:
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@types/pg@8.23.1)(pg@8.23.0)
       envalid:
         specifier: ^8.2.0
         version: 8.2.0
@@ -81,9 +90,9 @@ importers:
       '@types/node':
         specifier: ^22.10.0
         version: 22.20.4
-      drizzle-orm:
-        specifier: ^0.36.4
-        version: 0.36.4(@types/pg@8.23.1)(pg@8.23.0)
+      ecpair:
+        specifier: ^2.1.0
+        version: 2.1.0
       tiny-secp256k1:
         specifier: ^2.2.3
         version: 2.2.4
@@ -478,6 +487,22 @@ importers:
         version: 2.1.9(@types/node@22.20.4)
 
   packages/cove-wire:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.20.4)
+
+  packages/crc20-curve:
+    dependencies:
+      '@crclaunch/cove-economics':
+        specifier: workspace:*
+        version: link:../cove-economics
+      '@crclaunch/curve':
+        specifier: workspace:*
+        version: link:../curve
     devDependencies:
       typescript:
         specifier: ^5.7.2

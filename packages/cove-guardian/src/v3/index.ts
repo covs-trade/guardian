@@ -1,4 +1,4 @@
-export { GuardianV3Signer, type VaultLeafRef } from "./signer.js";
+export { GuardianV3Signer, verifyVaultExecutionSignature, type VaultLeafRef } from "./signer.js";
 export {
   signVaultExecutionLeafWithCustody,
   localSigningBackend,

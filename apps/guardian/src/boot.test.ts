@@ -53,6 +53,9 @@ describe("Guardian boot (env)", () => {
     expect(boot.custody).toBe("test");
     expect(boot.profile.source).toBe("test-only");
     expect(boot.port).toBe(4391);
+    expect(boot.crcSigningActive).toBe(false);
+    expect(resolveGuardianBoot({ ...BASE, COVE_NETWORK: "regtest", COVE_TEST_ONLY_PROFILE_PATH: FIXTURE,
+      GUARDIAN_TEST_KEY_HEX: "42".repeat(32), COVE_CRC_SIGNING_ACTIVE: "true" }).crcSigningActive).toBe(true);
   });
   it("regtest selects the bundled regtest profile", () => {
     expect(() =>

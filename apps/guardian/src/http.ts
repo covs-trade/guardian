@@ -13,6 +13,7 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 }
 export function createGuardianHttpServer(config: {
   transport: GuardianTransport;
+  crcTransport?: { sign(req: unknown): Promise<unknown> };
   authToken: string;
 }) {
   if (!config.authToken)
@@ -33,7 +34,8 @@ export function createGuardianHttpServer(config: {
         return json(res, 429, { error: "rate limited" });
       if (req.method === "GET" && url === "/health")
         return json(res, 200, await config.transport.health());
-      if (req.method === "POST" && url === "/sign") {
+      if (req.method === "POST" &&
+        (url === "/sign" || (url === "/sign/crc20" && config.crcTransport))) {
         if (signing >= 2) {
           res.setHeader("retry-after", "2");
           return json(res, 503, { error: "signing capacity unavailable" });
@@ -55,7 +57,9 @@ export function createGuardianHttpServer(config: {
           const body = await readJsonWithLimit(req, 1000000, signal);
           signal.throwIfAborted();
           const result = await withRpcDeadline(signal, () =>
-            config.transport.sign(body as never),
+            url === "/sign/crc20"
+              ? config.crcTransport!.sign(body)
+              : config.transport.sign(body as never),
           );
           return json(res, 200, result);
         } finally {

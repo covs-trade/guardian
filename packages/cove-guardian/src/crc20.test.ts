@@ -2,7 +2,7 @@ import * as bitcoin from "bitcoinjs-lib";
 import * as ecc from "tiny-secp256k1";
 import { ECPairFactory } from "ecpair";
 import { describe, expect, it } from "vitest";
-import { buildCrc20BackingVault, dev1RecoveryProfile } from "@crclaunch/cove-vault";
+import { buildCrc20AssetVault, dev1RecoveryProfile } from "@crclaunch/cove-vault";
 import { TestGuardianCustodyBackend } from "./v3/custody.js";
 import { verifyVaultExecutionSignature } from "./v3/signer.js";
 import { signCrc20VaultInput } from "./crc20.js";
@@ -13,14 +13,10 @@ const guardianPriv = Buffer.alloc(32, 0x41);
 const wallet = ECPair.fromPrivateKey(Buffer.alloc(32, 0x42));
 const guardianXOnly = Buffer.from(ecc.pointFromScalar(guardianPriv, true)!).subarray(1);
 const ownerXOnly = Buffer.from(ecc.pointFromScalar(Buffer.alloc(32, 0x43), true)!).subarray(1);
-const vault = buildCrc20BackingVault({
-  state: {
+const vault = buildCrc20AssetVault({
+  asset: {
     deploymentTag: Buffer.alloc(32, 0x44),
     launchSalt: Buffer.alloc(32, 0x45),
-    mintedAtoms: 0n,
-    vaultAtoms: 0n,
-    backingSats: 0n,
-    anchorSats: 10_000n,
   },
   guardianXOnly,
   recoveryProfile: dev1RecoveryProfile(ownerXOnly),

@@ -34,6 +34,7 @@ export interface GuardianBoot {
   network: CoveNetworkName;
   mainnetGuard: boolean;
   canaryActive: boolean;
+  crcSigningActive: boolean;
   profile: ResolvedMainnetProfile;
   custodyBackend: GuardianCustodyBackend;
   custody: "env-key" | "test" | "unconfigured";
@@ -79,6 +80,7 @@ export function resolveGuardianBoot(
       COVE_FEE_ADDRESS: str({ default: "" }),
       COVE_TEST_ONLY_PROFILE_PATH: str({ default: "" }),
       COVE_V3_CANARY_ACTIVE: bool({ default: false }),
+      COVE_CRC_SIGNING_ACTIVE: bool({ default: false }),
       COVE_ORD_URL: httpUrl({ default: "" }),
     },
     {
@@ -112,6 +114,7 @@ export function resolveGuardianBoot(
     network,
     mainnetGuard,
     canaryActive: env.COVE_V3_CANARY_ACTIVE,
+    crcSigningActive: env.COVE_CRC_SIGNING_ACTIVE,
     profile,
     custodyBackend,
     custody: keyHex ? "env-key" : testKeyHex ? "test" : "unconfigured",

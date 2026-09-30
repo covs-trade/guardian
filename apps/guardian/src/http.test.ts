@@ -27,6 +27,29 @@ async function start(sign: GuardianTransport["sign"]) {
 }
 const failure = { ok: false as const, reason: "test", detail: "test" };
 describe("Guardian request lifecycle", () => {
+  it("keeps CRC signing absent unless explicitly configured", async () => {
+    const url = await start(async () => failure);
+    const response = await fetch(`${url}/crc20`, {
+      method: "POST", headers: { authorization: "Bearer test" }, body: "{}",
+    });
+    expect(response.status).toBe(404);
+  });
+  it("routes opted-in CRC signing through the same authenticated capacity gate", async () => {
+    const crcSign = vi.fn(async () => ({ ok: false as const, reason: "TEST", detail: "crc" }));
+    const server = createGuardianHttpServer({
+      authToken: "test", transport: { health: vi.fn(), sign: async () => failure },
+      crcTransport: { sign: crcSign },
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/sign/crc20`;
+    const denied = await fetch(url, { method: "POST", body: "{}" });
+    expect(denied.status).toBe(401);
+    const response = await fetch(url, { method: "POST", headers: { authorization: "Bearer test" }, body: "{}" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: false, reason: "TEST", detail: "crc" });
+    expect(crcSign).toHaveBeenCalledTimes(1);
+  });
   it("normal completed POST does not abort the signing operation", async () => {
     const url = await start(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));

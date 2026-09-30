@@ -18,6 +18,7 @@ async function main(): Promise<void> {
     databaseUrl: boot.databaseUrl,
     network: boot.network,
     signingArmed: boot.canaryActive,
+    crcSigningActive: boot.crcSigningActive,
     custodyBackend: boot.custodyBackend,
     coreRpc: boot.coreRpc,
     rpcRequestsPerSecond: boot.rpcRequestsPerSecond,
@@ -40,8 +41,10 @@ async function main(): Promise<void> {
   } else if (boot.mainnetGuard) {
     throw new Error("mainnet requires GUARDIAN_KEY_HEX");
   }
+  await built.crcTransport?.probe();
   const server = createGuardianHttpServer({
     transport: built.transport,
+    crcTransport: built.crcTransport,
     authToken: boot.authToken,
   });
   server.listen(boot.port, () => {

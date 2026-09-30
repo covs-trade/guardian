@@ -9,17 +9,10 @@ import type { CoveVault } from "./vault.js";
 
 bitcoin.initEccLib(ecc as unknown as Parameters<typeof bitcoin.initEccLib>[0]);
 
-export interface Crc20VaultState {
+export interface Crc20AssetIdentity {
   deploymentTag: Buffer;
   launchSalt: Buffer;
-  mintedAtoms: bigint;
-  vaultAtoms: bigint;
-  backingSats: bigint;
-  anchorSats: bigint;
 }
-
-const LOT_ATOMS = 100_000_000_000n;
-const MAX_ATOMS = 2_100_000_000_000_000n;
 
 export function randomCrc20LaunchSalt(): Buffer {
   return randomBytes(32);
@@ -31,37 +24,19 @@ export function crc20DeploymentTag(markerBytes: Buffer): Buffer {
   return taggedHash("CoveCRC20Deployment/v1", markerBytes);
 }
 
-function uint64(value: bigint): Buffer {
-  if (value < 0n || value > 0xffff_ffff_ffff_ffffn)
-    throw new Error("CRC vault integer is outside uint64 range");
-  const bytes = Buffer.alloc(8);
-  bytes.writeBigUInt64LE(value);
-  return bytes;
-}
-
-export function crc20VaultStateCommitment(state: Crc20VaultState): Buffer {
-  if (state.deploymentTag.length !== 32)
+export function crc20AssetCommitment(asset: Crc20AssetIdentity): Buffer {
+  if (asset.deploymentTag.length !== 32)
     throw new Error("CRC deployment tag must be 32 bytes");
-  if (state.launchSalt.length !== 32 || state.launchSalt.every((byte) => byte === 0))
+  if (asset.launchSalt.length !== 32 || asset.launchSalt.every((byte) => byte === 0))
     throw new Error("CRC launch salt must be a nonzero 32-byte value");
-  if (state.mintedAtoms < 0n || state.mintedAtoms > MAX_ATOMS ||
-    state.vaultAtoms < 0n || state.vaultAtoms > state.mintedAtoms ||
-    state.mintedAtoms % LOT_ATOMS !== 0n || state.vaultAtoms % LOT_ATOMS !== 0n)
-    throw new Error("invalid CRC vault supply");
-  if (state.backingSats < 0n || state.anchorSats <= 0n)
-    throw new Error("invalid CRC vault backing or anchor");
-  return taggedHash("CoveCRC20VaultState/v1", Buffer.concat([
-    state.deploymentTag,
-    state.launchSalt,
-    uint64(state.mintedAtoms),
-    uint64(state.vaultAtoms),
-    uint64(state.backingSats),
-    uint64(state.anchorSats),
+  return taggedHash("CoveCRC20AssetVault/v1", Buffer.concat([
+    asset.deploymentTag,
+    asset.launchSalt,
   ]));
 }
 
-export function buildCrc20BackingVault(params: {
-  state: Crc20VaultState;
+export function buildCrc20AssetVault(params: {
+  asset: Crc20AssetIdentity;
   guardianXOnly: Buffer;
   recoveryProfile: VaultRecoveryProfile;
   network?: bitcoin.networks.Network;
@@ -71,7 +46,7 @@ export function buildCrc20BackingVault(params: {
   const recoveryKeys = sortRecoveryPubkeys(params.recoveryProfile.recoveryPubkeys);
   if (recoveryKeys.some((key) => key.equals(params.guardianXOnly)))
     throw new Error("CRC Guardian and recovery keys must be distinct");
-  const commitment = crc20VaultStateCommitment(params.state);
+  const commitment = crc20AssetCommitment(params.asset);
   const executionScript = buildExecutionLeaf(commitment, params.guardianXOnly);
   const recoveryScript = buildRecoveryLeafForProfile(params.recoveryProfile);
   const executionHash = tapleafHash(executionScript, LEAF_VERSION_TAPSCRIPT);

@@ -32,12 +32,14 @@ import {
   PostgresGuardianAudit,
 } from "@crclaunch/cove-app";
 import type { Database } from "@crclaunch/db";
+import { CrcGuardianSigningService } from "./crc20-service.js";
 export interface GuardianServiceConfig {
   profile: ResolvedMainnetProfile;
   releaseId: string;
   databaseUrl: string;
   network: "regtest" | "signet" | "testnet" | "mainnet";
   signingArmed?: boolean;
+  crcSigningActive?: boolean;
   custodyBackend: GuardianCustodyBackend;
   coreRpc: {
     url: string;
@@ -52,6 +54,7 @@ export interface GuardianServiceConfig {
 const MAX_MINER_FEE_SATS = 20000n;
 export interface BuiltGuardianService {
   transport: GuardianTransport;
+  crcTransport?: CrcGuardianSigningService;
   profile: MainnetProfile;
   profileHash: string;
   guardianXOnly: string;
@@ -305,5 +308,13 @@ export function buildGuardianService(
     config.network,
     config.signingArmed === true,
   );
-  return { transport, profile, profileHash, guardianXOnly, core };
+  const crcTransport = config.crcSigningActive
+    ? new CrcGuardianSigningService({
+        db, core, custodyBackend: config.custodyBackend,
+        guardianXOnly: Buffer.from(guardianXOnly, "hex"),
+        recoveryProfile, network: config.network, protocolScript: feeScript,
+        maxMinerFeeSats: MAX_MINER_FEE_SATS,
+      })
+    : undefined;
+  return { transport, crcTransport, profile, profileHash, guardianXOnly, core };
 }

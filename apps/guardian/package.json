@@ -14,7 +14,9 @@
   "dependencies": {
     "@crclaunch/bitcoin": "workspace:*",
     "@crclaunch/config": "workspace:*",
+    "@crclaunch/crc20-curve": "workspace:*",
     "@crclaunch/cove-app": "workspace:*",
+    "@crclaunch/cove-economics": "workspace:*",
     "@crclaunch/cove-guardian": "workspace:*",
     "@crclaunch/cove-indexer": "workspace:*",
     "@crclaunch/cove-mainnet": "workspace:*",
@@ -23,15 +25,16 @@
     "@crclaunch/db": "workspace:*",
     "bitcoinjs-lib": "^6.1.7",
     "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.36.4",
     "envalid": "^8.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "ecpair": "^2.1.0",
     "tiny-secp256k1": "^2.2.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
-    "drizzle-orm": "^0.36.4",
     "@crclaunch/cove-covenant": "workspace:*"
   }
 }
