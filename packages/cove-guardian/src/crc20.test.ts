@@ -22,6 +22,13 @@ const vault = buildCrc20AssetVault({
   recoveryProfile: dev1RecoveryProfile(ownerXOnly),
 });
 const backend = new TestGuardianCustodyBackend(guardianPriv);
+const goldenVector = JSON.parse(readFileSync(new URL("./fixtures/crc20-guardian-signed-psbt.json", import.meta.url), "utf8")) as {
+  walletSignedPsbtBase64: string;
+  guardianSignedPsbtBase64: string;
+  guardianSignatureHex: string;
+  vaultScriptHex: string;
+  unsignedTxDigest: string;
+};
 
 function transaction(): bitcoin.Psbt {
   const psbt = new bitcoin.Psbt({ network: bitcoin.networks.regtest });
@@ -50,7 +57,14 @@ describe("CRC vault Guardian signature", () => {
   it("signs the exact transaction after the trader and commits SIGHASH_ALL", async () => {
     const psbt = transaction();
     psbt.signInput(1, wallet);
+    const walletSignedPsbtBase64 = psbt.toBase64();
     const sig = await signCrc20VaultInput(psbt, vault, backend);
+    expect(walletSignedPsbtBase64).toBe(goldenVector.walletSignedPsbtBase64);
+    expect(psbt.toBase64()).toBe(goldenVector.guardianSignedPsbtBase64);
+    expect(sig.toString("hex")).toBe(goldenVector.guardianSignatureHex);
+    expect(vault.scriptPubKey.toString("hex")).toBe(goldenVector.vaultScriptHex);
+    expect(createHash("sha256").update(psbt.data.globalMap.unsignedTx.toBuffer()).digest("hex"))
+      .toBe(goldenVector.unsignedTxDigest);
     expect(sig).toHaveLength(65);
     expect(sig[64]).toBe(bitcoin.Transaction.SIGHASH_ALL);
     expect(psbt.data.inputs[0]!.finalScriptWitness).toBeDefined();
@@ -67,3 +81,5 @@ describe("CRC vault Guardian signature", () => {
     await expect(signCrc20VaultInput(psbt, vault, backend)).rejects.toThrow(/vault script/i);
   });
 });
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
