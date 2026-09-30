@@ -44,11 +44,14 @@ export function parseCrcSnapshotRow(
   try { payload = JSON.parse(marker.toString("utf8")) as Record<string, unknown>; }
   catch { throw new Error("CRC launch marker JSON is invalid"); }
   const ticker = stringField(row, "ticker");
+  const protocolVersion = Number(row.protocol_version ?? 1);
+  if (protocolVersion !== 1 && protocolVersion !== 2)
+    throw new Error("CRC registered protocol version is invalid");
   if (payload.p !== "crc-20" || payload.op !== "deploy" || payload.tick !== ticker ||
     payload.type !== "bonding" || payload.max !== "2100000000000000" ||
-    payload.cv !== "cove-curve-v1" ||
+    payload.cv !== `cove-curve-v${protocolVersion}` ||
     Object.keys(payload).sort().join(",") !== "cv,max,op,p,tick,type")
-    throw new Error("CRC launch marker does not match registered v1 asset");
+    throw new Error("CRC launch marker does not match registered asset version");
   const launchSaltHex = stringField(row, "launch_salt_hex");
   if (!hex64.test(launchSaltHex) || /^0+$/.test(launchSaltHex) || launchSaltHex !== row.intent_salt_hex)
     throw new Error("CRC launch salt mismatch");
@@ -95,10 +98,11 @@ export function parseCrcSnapshotRow(
     vaultOutpoint: { txid: vaultTxid, vout: vaultVout },
     vaultScript: Buffer.from(vaultScriptHex, "hex"),
     curve: {
-      version: "cove-curve-v1", mintedAtoms, vaultAtoms, circulatingAtoms,
+      version: `cove-curve-v${protocolVersion}` as "cove-curve-v1" | "cove-curve-v2", mintedAtoms, vaultAtoms, circulatingAtoms,
       vaultAnchorSats: anchorSats, vaultSats, vaultOutpoint: `${vaultTxid}:${vaultVout}`,
     },
     sellerBalanceAtoms: atoms(row, "seller_balance_atoms"),
+    protocolVersion,
     cursorHeight, cursorBlockHash, cursorStateRoot,
   };
 }
@@ -111,7 +115,7 @@ export async function loadCrcTrustedSnapshot(params: {
   configuredProtocolScriptHex: string;
 }): Promise<CrcTrustedSnapshot> {
   const result = await params.db.execute(sql`
-    select a.ticker, a.creator_script_hex, a.protocol_script_hex, a.launch_salt_hex,
+    select a.ticker, a.protocol_version, a.creator_script_hex, a.protocol_script_hex, a.launch_salt_hex,
       a.deploy_height::text, a.deploy_block_hash,
       i.signed_raw_hex, i.raw_sha256, i.launch_salt_hex as intent_salt_hex,
       i.vault_script_hex as intent_vault_script_hex,

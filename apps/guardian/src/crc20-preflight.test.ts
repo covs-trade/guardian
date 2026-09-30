@@ -20,6 +20,8 @@ function fixture(options: {
   sighash?: number;
   firstTxid?: string;
   outputCount?: number;
+  version?: 2;
+  changeVout?: number;
 } = {}) {
   const marker = bitcoin.script.compile([
     bitcoin.opcodes.OP_RETURN!,
@@ -29,6 +31,8 @@ function fixture(options: {
       tick: options.tick ?? "COVE",
       amt: options.amt ?? "100000000000",
       id: options.id ?? ID,
+      ...(options.version === 2 ? { v: 2 } : {}),
+      ...(options.changeVout !== undefined ? { ch: options.changeVout } : {}),
       ...options.extra,
     })),
   ]);
@@ -66,6 +70,24 @@ const expected = {
 };
 
 describe("Cove CRC-20 Guardian PSBT preflight", () => {
+  it("accepts v2 mint and an exact seller change index", () => {
+    expect(preflightCoveCrcPsbt(fixture({ version: 2 }), { ...expected, version: 2 })).toMatchObject({
+      version: 2, amountAtoms: 100000000000n,
+    });
+    const sell = fixture({ version: 2, op: "transfer", outputCount: 4, changeVout: 4 });
+    sell.addOutput({ script: BUYER, value: 330 });
+    expect(preflightCoveCrcPsbt(sell, { ...expected, version: 2, operation: "sell" })).toMatchObject({
+      version: 2, changeVout: 4,
+    });
+  });
+
+  it("rejects v1 marker for v2 asset and malformed v2 change fields", () => {
+    expect(() => preflightCoveCrcPsbt(fixture(), { ...expected, version: 2 })).toThrow(/version/i);
+    expect(() => preflightCoveCrcPsbt(fixture({ version: 2 }), expected)).toThrow(/version|field/i);
+    for (const changeVout of [0, 1, 2, 3, 5]) {
+      expect(() => preflightCoveCrcPsbt(fixture({ version: 2, changeVout }), { ...expected, version: 2 })).toThrow(/change/i);
+    }
+  });
   it("accepts a canonical mint-buy and returns the committed amount", () => {
     expect(preflightCoveCrcPsbt(fixture(), expected)).toMatchObject({
       operation: "mint-buy",

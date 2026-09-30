@@ -36,7 +36,8 @@ export class CrcGuardianSigningService {
 
   async probe(): Promise<void> {
     await this.options.db.execute(sql`select network from cove_crc_signing_journal limit 1`);
-    await this.options.db.execute(sql`select launch_salt_hex from cove_crc_assets limit 1`);
+    await this.options.db.execute(sql`select launch_salt_hex, protocol_version from cove_crc_assets limit 1`);
+    await this.options.db.execute(sql`select network from cove_crc_token_utxos limit 1`);
   }
 
   async sign(raw: unknown): Promise<CrcSignResponse> {
@@ -75,16 +76,18 @@ export class CrcGuardianSigningService {
       if (cursorHash !== snapshot.cursorBlockHash)
         throw new Error("CRC indexer cursor diverged from Core");
       const result = await this.options.db.execute(sql`
-        select v.txid, v.vout, v.script_hex, v.btc_sats::text, v.minted_atoms::text,
+        select a.protocol_version, v.txid, v.vout, v.script_hex, v.btc_sats::text, v.minted_atoms::text,
           v.inventory_atoms::text, v.availability, c.height::text as cursor_height,
           c.block_hash as cursor_hash, c.state_root,
           coalesce(b.atoms, 0)::text as seller_balance_atoms
         from cove_crc_vaults v join cove_crc_cursor c on c.network = v.network
+        join cove_crc_assets a on a.network = v.network and a.deploy_txid = v.deploy_txid
         left join cove_crc_balances b on b.network = v.network and b.deploy_txid = v.deploy_txid
           and b.script_hex = ${payerScript.toString("hex")}
         where v.network = ${snapshot.network} and v.deploy_txid = ${snapshot.deployTxid}`);
       const row = result.rows[0];
-      if (!row || row.txid !== snapshot.vaultOutpoint.txid || row.vout !== snapshot.vaultOutpoint.vout ||
+      if (!row || Number(row.protocol_version ?? 1) !== (snapshot.protocolVersion ?? 1) ||
+        row.txid !== snapshot.vaultOutpoint.txid || row.vout !== snapshot.vaultOutpoint.vout ||
         row.script_hex !== snapshot.vaultScript.toString("hex") ||
         String(row.btc_sats) !== snapshot.curve.vaultSats.toString() ||
         String(row.minted_atoms) !== snapshot.curve.mintedAtoms.toString() ||
@@ -107,6 +110,19 @@ export class CrcGuardianSigningService {
           script: Buffer.from(output.scriptPubKeyHex, "hex"),
           valueSats: output.valueSats,
           confirmations: output.confirmations,
+        } : null;
+      },
+      tokenPrevouts: async (txid, vout) => {
+        const result = await this.options.db.execute(sql`
+          select deploy_txid, script_hex, atoms::text
+          from cove_crc_token_utxos
+          where network = ${snapshot.network} and txid = ${txid} and vout = ${vout}
+          limit 1`);
+        const row = result.rows[0];
+        return row ? {
+          deployTxid: String(row.deploy_txid),
+          script: Buffer.from(String(row.script_hex), "hex"),
+          atoms: BigInt(String(row.atoms)),
         } : null;
       },
       assertCurrent,

@@ -29,12 +29,23 @@ const deployTxid = "aa".repeat(32);
 const vaultTxid = "bb".repeat(32);
 const walletTxid = "cc".repeat(32);
 
-function fixture(kind: "mint-buy" | "sell", change?: "fee" | "vault-script" | "amount" | "payout-script", separateWallets = false) {
+function fixture(kind: "mint-buy" | "inventory-buy" | "sell", change?: "fee" | "vault-script" | "amount" | "payout-script", separateWallets = false, v2?: {
+  sellerAtoms?: bigint;
+  missingSeller?: boolean;
+  fundingToken?: boolean;
+  forgedChange?: boolean;
+  forgedPayout?: boolean;
+}) {
   const sold = kind === "sell";
+  const selectedDeployMarkerBytes = v2 ? Buffer.from(deployMarkerBytes.toString("utf8").replace("cove-curve-v1", "cove-curve-v2")) : deployMarkerBytes;
+  const selectedVault = v2 ? buildCrc20AssetVault({
+    asset: { deploymentTag: crc20DeploymentTag(selectedDeployMarkerBytes), launchSalt },
+    guardianXOnly, recoveryProfile,
+  }) : vault;
   const curve = {
-    version: "cove-curve-v1" as const,
-    mintedAtoms: sold ? 100_000_000_000n : 0n,
-    vaultAtoms: 0n,
+    version: v2 ? "cove-curve-v2" as const : "cove-curve-v1" as const,
+    mintedAtoms: sold || kind === "inventory-buy" ? 100_000_000_000n : 0n,
+    vaultAtoms: kind === "inventory-buy" ? 100_000_000_000n : 0n,
     circulatingAtoms: sold ? 100_000_000_000n : 0n,
     vaultAnchorSats: 10_000n,
     vaultSats: sold ? 10_027n : 10_000n,
@@ -44,13 +55,16 @@ function fixture(kind: "mint-buy" | "sell", change?: "fee" | "vault-script" | "a
   const quote = sold ? quoteSell(curve, amountTokens, dustThreshold(walletScript)) : quoteBuy(curve, amountTokens);
   const marker = bitcoin.script.compile([
     bitcoin.opcodes.OP_RETURN!,
-    Buffer.from(JSON.stringify({ p: "crc-20", op: sold ? "transfer" : "mint", tick: "COVE", amt: change === "amount" ? "200000000000" : "100000000000", id: deployTxid })),
+    Buffer.from(JSON.stringify({ p: "crc-20", op: kind === "mint-buy" ? "mint" : "transfer", tick: "COVE", amt: change === "amount" ? "200000000000" : "100000000000", id: deployTxid,
+      ...(v2 ? { v: 2 } : {}),
+      ...(v2 && sold && (v2.sellerAtoms ?? 100_000_000_000n) > 100_000_000_000n ? { ch: 4 } : {}),
+    })),
   ]);
   const psbt = new bitcoin.Psbt({ network: bitcoin.networks.regtest });
   psbt.addInput({ hash: vaultTxid, index: 1,
-    witnessUtxo: { script: vault.scriptPubKey, value: Number(curve.vaultSats) },
-    tapInternalKey: vault.numsKey, tapMerkleRoot: vault.merkleRoot,
-    tapLeafScript: [{ leafVersion: 0xc0, script: vault.executionLeaf.script, controlBlock: vault.executionControlBlock }],
+    witnessUtxo: { script: selectedVault.scriptPubKey, value: Number(curve.vaultSats) },
+    tapInternalKey: selectedVault.numsKey, tapMerkleRoot: selectedVault.merkleRoot,
+    tapLeafScript: [{ leafVersion: 0xc0, script: selectedVault.executionLeaf.script, controlBlock: selectedVault.executionControlBlock }],
     sighashType: bitcoin.Transaction.SIGHASH_ALL,
   });
   psbt.addInput({ hash: walletTxid, index: 0,
@@ -64,13 +78,15 @@ function fixture(kind: "mint-buy" | "sell", change?: "fee" | "vault-script" | "a
   psbt.addOutput({ script: marker, value: 0 });
   if (sold) {
     const sell = quote as ReturnType<typeof quoteSell>;
-    psbt.addOutput({ script: change === "vault-script" ? creatorScript : vault.scriptPubKey, value: Number(curve.vaultSats - sell.grossSats) });
-    psbt.addOutput({ script: change === "payout-script" ? creatorScript : walletScript, value: Number(sell.sellerPayoutSats) });
+    psbt.addOutput({ script: change === "vault-script" ? creatorScript : selectedVault.scriptPubKey, value: Number(curve.vaultSats - sell.grossSats) });
+    psbt.addOutput({ script: change === "payout-script" ? creatorScript : v2 && separateWallets && !v2.forgedPayout ? ordScript : walletScript, value: Number(sell.sellerPayoutSats) });
     psbt.addOutput({ script: feeScript, value: Number(sell.protocolFeeSats + (change === "fee" ? 1n : 0n)) });
+    if (v2 && (v2.sellerAtoms ?? 100_000_000_000n) > 100_000_000_000n)
+      psbt.addOutput({ script: v2.forgedChange ? creatorScript : separateWallets ? ordScript : walletScript, value: 330 });
   } else {
     const buy = quote as ReturnType<typeof quoteBuy>;
     psbt.addOutput({ script: separateWallets ? ordScript : walletScript, value: 330 });
-    psbt.addOutput({ script: change === "vault-script" ? creatorScript : vault.scriptPubKey, value: Number(curve.vaultSats + buy.grossSats) });
+    psbt.addOutput({ script: change === "vault-script" ? creatorScript : selectedVault.scriptPubKey, value: Number(curve.vaultSats + buy.grossSats) });
     psbt.addOutput({ script: feeScript, value: Number(buy.protocolFeeSats + (change === "fee" ? 1n : 0n)) });
     psbt.addOutput({ script: creatorScript, value: Number(buy.creatorFeeSats) });
   }
@@ -78,26 +94,64 @@ function fixture(kind: "mint-buy" | "sell", change?: "fee" | "vault-script" | "a
   if (sold && separateWallets) psbt.signInput(2, wallet);
   const snapshot = {
     network: "regtest" as const,
-    deployTxid, ticker: "COVE", deployMarkerBytes, launchSalt,
+    deployTxid, ticker: "COVE", deployMarkerBytes: selectedDeployMarkerBytes, launchSalt,
     creatorScript, protocolScript: feeScript,
     vaultOutpoint: { txid: vaultTxid, vout: 1 },
-    vaultScript: vault.scriptPubKey,
+    vaultScript: selectedVault.scriptPubKey,
     curve,
     sellerBalanceAtoms: sold ? 100_000_000_000n : 0n,
+    ...(v2 ? { protocolVersion: 2 as const } : {}),
     cursorHeight: 100,
     cursorBlockHash: "dd".repeat(32),
     cursorStateRoot: "ee".repeat(32),
   };
   const prevouts = async (txid: string, vout: number) => {
-    if (txid === vaultTxid && vout === 1) return { script: vault.scriptPubKey, valueSats: curve.vaultSats, confirmations: 2 };
+    if (txid === vaultTxid && vout === 1) return { script: selectedVault.scriptPubKey, valueSats: curve.vaultSats, confirmations: 2 };
     if (txid === walletTxid && vout === 0) return { script: sold && separateWallets ? ordScript : walletScript, valueSats: 10_000n, confirmations: 2 };
     if (txid === "ef".repeat(32) && vout === 0) return { script: walletScript, valueSats: 10_000n, confirmations: 2 };
     return null;
   };
-  return { psbt, snapshot, prevouts };
+  const tokenPrevouts = async (txid: string, vout: number) => {
+    if (txid === vaultTxid && vout === 1 && curve.vaultAtoms > 0n)
+      return { deployTxid, script: selectedVault.scriptPubKey, atoms: curve.vaultAtoms };
+    if (sold && !v2?.missingSeller && txid === walletTxid && vout === 0)
+      return { deployTxid, script: separateWallets ? ordScript : walletScript, atoms: v2?.sellerAtoms ?? 100_000_000_000n };
+    if (v2?.fundingToken && txid === walletTxid && vout === 0)
+      return { deployTxid, script: walletScript, atoms: 100_000_000_000n };
+    return null;
+  };
+  return { psbt, snapshot, prevouts, tokenPrevouts };
 }
 
 describe("Guardian CRC trade validation", () => {
+  it("accepts v2 mint and exact seller token outpoint, including token change", async () => {
+    for (const [operation, extra] of [["mint-buy", {}], ["inventory-buy", {}], ["sell", {}], ["sell", { sellerAtoms: 200_000_000_000n }]] as const) {
+      const f = fixture(operation, undefined, false, extra);
+      await expect(validateCrc20Trade({ ...f, operation, guardianXOnly, recoveryProfile,
+        expectedProtocolScript: feeScript, maxMinerFeeSats: 20_000n })).resolves.toMatchObject({ operation });
+    }
+    const splitWallets = fixture("sell", undefined, true, {});
+    await expect(validateCrc20Trade({ ...splitWallets, operation: "sell", guardianXOnly, recoveryProfile,
+      expectedProtocolScript: feeScript, maxMinerFeeSats: 20_000n })).resolves.toMatchObject({ operation: "sell" });
+  });
+
+  it("rejects ordinary same-script funding substituted for a seller token carrier", async () => {
+    const f = fixture("sell", undefined, false, { missingSeller: true });
+    await expect(validateCrc20Trade({ ...f, operation: "sell", guardianXOnly, recoveryProfile,
+      expectedProtocolScript: feeScript, maxMinerFeeSats: 20_000n })).rejects.toThrow(/token-bearing/i);
+  });
+
+  it("rejects hidden token authority among buy funding inputs and forged seller token change", async () => {
+    const b = fixture("mint-buy", undefined, false, { fundingToken: true });
+    await expect(validateCrc20Trade({ ...b, operation: "mint-buy", guardianXOnly, recoveryProfile,
+      expectedProtocolScript: feeScript, maxMinerFeeSats: 20_000n })).rejects.toThrow(/funding input carries token/i);
+    const s = fixture("sell", undefined, false, { sellerAtoms: 200_000_000_000n, forgedChange: true });
+    await expect(validateCrc20Trade({ ...s, operation: "sell", guardianXOnly, recoveryProfile,
+      expectedProtocolScript: feeScript, maxMinerFeeSats: 20_000n })).rejects.toThrow(/token change output/i);
+    const diverted = fixture("sell", undefined, true, { forgedPayout: true });
+    await expect(validateCrc20Trade({ ...diverted, operation: "sell", guardianXOnly, recoveryProfile,
+      expectedProtocolScript: feeScript, maxMinerFeeSats: 20_000n })).rejects.toThrow(/payout/i);
+  });
   it("accepts exact mint buy and sell with verified prevouts and wallet signature", async () => {
     for (const operation of ["mint-buy", "sell"] as const) {
       const f = fixture(operation);

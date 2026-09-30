@@ -27,11 +27,11 @@ export function isCoveCurveDeploy(payload: Record<string, unknown>): boolean {
     payload.p === "crc-20" && payload.op === "deploy" &&
     typeof payload.tick === "string" && /^[A-Za-z0-9]{1,16}$/.test(payload.tick) &&
     payload.type === "bonding" && payload.max === CAP_ATOMS.toString() &&
-    payload.cv === "cove-curve-v1";
+    (payload.cv === "cove-curve-v1" || payload.cv === "cove-curve-v2");
 }
 
 export type CurveState = Readonly<{
-  version: "cove-curve-v1";
+  version: "cove-curve-v1" | "cove-curve-v2";
   mintedAtoms: bigint;
   vaultAtoms: bigint;
   circulatingAtoms: bigint;
@@ -101,7 +101,7 @@ function assertWholeLots(amountAtoms: bigint): bigint {
 }
 
 function assertState(state: CurveState): void {
-  if (state.version !== "cove-curve-v1") fail("UNKNOWN_CURVE", "unknown curve version");
+  if (state.version !== "cove-curve-v1" && state.version !== "cove-curve-v2") fail("UNKNOWN_CURVE", "unknown curve version");
   if (
     state.mintedAtoms < 0n ||
     state.mintedAtoms > CAP_ATOMS ||

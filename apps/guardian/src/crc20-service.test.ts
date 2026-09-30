@@ -84,6 +84,14 @@ function setup() {
 }
 
 describe("CRC Guardian signing coordinator", () => {
+  it("refuses peer market fills because they have no Guardian vault signature", async () => {
+    const f = setup();
+    const result = await f.service.sign({ requestId: "market", network: "regtest", deploymentTxid: f.deployTxid,
+      operation: "market-fill", psbtBase64: f.psbt.toBase64() });
+    expect(result).toMatchObject({ ok: false, reason: "CRC_SIGN_REJECTED" });
+    expect(f.sign).not.toHaveBeenCalled();
+    expect(f.db.execute).not.toHaveBeenCalled();
+  });
   it("validates trusted state and Core, journals before signing, and persists signed PSBT", async () => {
     const f = setup();
     const result = await f.service.sign({ requestId: "r1", network: "regtest", deploymentTxid: f.deployTxid,
