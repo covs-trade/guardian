@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as bitcoin from "bitcoinjs-lib";
 import { sql } from "drizzle-orm";
 import type { Database } from "@crclaunch/db";
@@ -88,7 +89,7 @@ export class CrcGuardianSigningService {
         String(row.btc_sats) !== snapshot.curve.vaultSats.toString() ||
         String(row.minted_atoms) !== snapshot.curve.mintedAtoms.toString() ||
         String(row.inventory_atoms) !== snapshot.curve.vaultAtoms.toString() ||
-        row.availability !== "live" ||
+        row.availability !== "active" ||
         Number(row.cursor_height) !== snapshot.cursorHeight || row.cursor_hash !== snapshot.cursorBlockHash ||
         row.state_root !== snapshot.cursorStateRoot ||
         String(row.seller_balance_atoms) !== snapshot.sellerBalanceAtoms.toString())
@@ -110,7 +111,7 @@ export class CrcGuardianSigningService {
       },
       assertCurrent,
     });
-    const digest = bitcoin.Transaction.fromBuffer(psbt.data.globalMap.unsignedTx.toBuffer()).getId();
+    const digest = createHash("sha256").update(psbt.data.globalMap.unsignedTx.toBuffer()).digest("hex");
     const vault = buildCrc20AssetVault({
       asset: { deploymentTag: crc20DeploymentTag(snapshot.deployMarkerBytes), launchSalt: snapshot.launchSalt },
       guardianXOnly, recoveryProfile: this.options.recoveryProfile,
@@ -136,7 +137,7 @@ export class CrcGuardianSigningService {
       const signed = existing.rows[0]?.signing_psbt_base64;
       if (typeof signed !== "string") throw new Error("CRC signing request is already in progress");
       const saved = bitcoin.Psbt.fromBase64(signed);
-      if (bitcoin.Transaction.fromBuffer(saved.data.globalMap.unsignedTx.toBuffer()).getId() !== digest)
+      if (createHash("sha256").update(saved.data.globalMap.unsignedTx.toBuffer()).digest("hex") !== digest)
         throw new Error("CRC signed journal commitment mismatch");
       const witness = saved.data.inputs[0]?.finalScriptWitness;
       if (!witness) throw new Error("CRC saved signing result is missing vault witness");

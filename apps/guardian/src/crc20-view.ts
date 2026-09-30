@@ -66,7 +66,7 @@ export function parseCrcSnapshotRow(
   const anchorSats = atoms(row, "vault_anchor_sats");
   if (anchorSats <= 0n || BigInt(tx.outs[1]!.value) !== anchorSats)
     throw new Error("CRC launch vault anchor mismatch");
-  if (row.availability !== "live") throw new Error("CRC asset vault is unavailable");
+  if (row.availability !== "active") throw new Error("CRC asset vault is unavailable");
   const mintedAtoms = atoms(row, "minted_atoms");
   const vaultAtoms = atoms(row, "inventory_atoms");
   if (vaultAtoms > mintedAtoms || (mintedAtoms - vaultAtoms) % 100_000_000n !== 0n)

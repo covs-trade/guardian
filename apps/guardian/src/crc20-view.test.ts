@@ -33,7 +33,7 @@ function fixture() {
     vault_anchor_sats: "10000", deploy_height: "50", deploy_block_hash: "aa".repeat(32),
     vault_txid: "bb".repeat(32), vault_vout: 2, vault_script_hex: vaultScript,
     btc_sats: "10027", minted_atoms: "100000000000", inventory_atoms: "0",
-    availability: "live", seller_balance_atoms: "100000000000",
+    availability: "active", seller_balance_atoms: "100000000000",
     cursor_height: "51", cursor_block_hash: "cc".repeat(32), cursor_state_root: "dd".repeat(32),
   }};
 }

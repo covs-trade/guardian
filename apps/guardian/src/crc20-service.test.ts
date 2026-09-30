@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as bitcoin from "bitcoinjs-lib";
 import * as ecc from "tiny-secp256k1";
 import { ECPairFactory } from "ecpair";
@@ -53,7 +54,7 @@ function setup() {
   };
   loadSnapshot.mockResolvedValue(snapshot);
   const stateRow = { txid: vaultTxid, vout: 1, script_hex: vault.scriptPubKey.toString("hex"),
-    btc_sats: "10000", minted_atoms: "0", inventory_atoms: "0", availability: "live",
+    btc_sats: "10000", minted_atoms: "0", inventory_atoms: "0", availability: "active",
     cursor_height: "100", cursor_hash: snapshot.cursorBlockHash, state_root: snapshot.cursorStateRoot,
     seller_balance_atoms: "0" };
   let statements = 0;
@@ -92,6 +93,8 @@ describe("CRC Guardian signing coordinator", () => {
     expect(f.db.execute).toHaveBeenCalledTimes(5);
     expect(f.core.getTxout).toHaveBeenCalledTimes(2);
     if (result.ok) {
+      expect(result.unsignedTxDigest).toBe(createHash("sha256")
+        .update(f.psbt.data.globalMap.unsignedTx.toBuffer()).digest("hex"));
       expect(bitcoin.Psbt.fromBase64(result.signedPsbtBase64).data.inputs[0]?.finalScriptWitness).toBeDefined();
       expect(result.signatureHex).toHaveLength(130);
     }

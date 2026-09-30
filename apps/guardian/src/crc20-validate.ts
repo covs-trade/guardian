@@ -97,7 +97,7 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
   const authorityScript = psbt.data.inputs[1]!.witnessUtxo!.script;
   const paymentScript = operation === "sell" && psbt.data.inputs[2]?.witnessUtxo
     ? psbt.data.inputs[2]!.witnessUtxo!.script
-    : operation === "sell" ? psbt.txOutputs[2]!.script : authorityScript;
+    : authorityScript;
   let inputSats = 0n;
   for (let index = 0; index < psbt.txInputs.length; index++) {
     const input = psbt.txInputs[index]!;

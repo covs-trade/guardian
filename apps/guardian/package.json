@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src --max-warnings=0",
-    "test": "vitest run"
+    "test": "vitest run",
+    "crc:regtest-lifecycle": "tsx src/crc20-regtest-lifecycle.mjs"
   },
   "dependencies": {
     "@crclaunch/bitcoin": "workspace:*",

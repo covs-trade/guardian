@@ -29,7 +29,7 @@ const deployTxid = "aa".repeat(32);
 const vaultTxid = "bb".repeat(32);
 const walletTxid = "cc".repeat(32);
 
-function fixture(kind: "mint-buy" | "sell", change?: "fee" | "vault-script" | "amount", separateWallets = false) {
+function fixture(kind: "mint-buy" | "sell", change?: "fee" | "vault-script" | "amount" | "payout-script", separateWallets = false) {
   const sold = kind === "sell";
   const curve = {
     version: "cove-curve-v1" as const,
@@ -65,7 +65,7 @@ function fixture(kind: "mint-buy" | "sell", change?: "fee" | "vault-script" | "a
   if (sold) {
     const sell = quote as ReturnType<typeof quoteSell>;
     psbt.addOutput({ script: change === "vault-script" ? creatorScript : vault.scriptPubKey, value: Number(curve.vaultSats - sell.grossSats) });
-    psbt.addOutput({ script: walletScript, value: Number(sell.sellerPayoutSats) });
+    psbt.addOutput({ script: change === "payout-script" ? creatorScript : walletScript, value: Number(sell.sellerPayoutSats) });
     psbt.addOutput({ script: feeScript, value: Number(sell.protocolFeeSats + (change === "fee" ? 1n : 0n)) });
   } else {
     const buy = quote as ReturnType<typeof quoteBuy>;
@@ -124,6 +124,11 @@ describe("Guardian CRC trade validation", () => {
   it("rejects a seller with insufficient token balance", async () => {
     const f = fixture("sell");
     await expect(validateCrc20Trade({ ...f, snapshot: { ...f.snapshot, sellerBalanceAtoms: 0n }, operation: "sell", guardianXOnly, recoveryProfile, expectedProtocolScript: feeScript, maxMinerFeeSats: 20_000n })).rejects.toThrow(/balance/i);
+  });
+  it("rejects a sell payout to a script outside the signed seller inputs", async () => {
+    const f = fixture("sell", "payout-script");
+    await expect(validateCrc20Trade({ ...f, operation: "sell", guardianXOnly, recoveryProfile,
+      expectedProtocolScript: feeScript, maxMinerFeeSats: 20_000n })).rejects.toThrow(/payout/i);
   });
   it("accepts separate ordinals token authority and payments fee/payout wallet", async () => {
     const f = fixture("sell", undefined, true);
