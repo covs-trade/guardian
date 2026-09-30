@@ -68,10 +68,10 @@ function fixture(kind: "mint-buy" | "inventory-buy" | "sell", change?: "fee" | "
     sighashType: bitcoin.Transaction.SIGHASH_ALL,
   });
   psbt.addInput({ hash: walletTxid, index: 0,
-    witnessUtxo: { script: sold && separateWallets ? ordScript : walletScript, value: 10_000 },
+    witnessUtxo: { script: sold && separateWallets ? ordScript : walletScript, value: sold && v2 ? 330 : 10_000 },
     sighashType: bitcoin.Transaction.SIGHASH_ALL,
   });
-  if (sold && separateWallets) psbt.addInput({ hash: "ef".repeat(32), index: 0,
+  if (sold && (separateWallets || v2)) psbt.addInput({ hash: "ef".repeat(32), index: 0,
     witnessUtxo: { script: walletScript, value: 10_000 },
     sighashType: bitcoin.Transaction.SIGHASH_ALL,
   });
@@ -79,7 +79,7 @@ function fixture(kind: "mint-buy" | "inventory-buy" | "sell", change?: "fee" | "
   if (sold) {
     const sell = quote as ReturnType<typeof quoteSell>;
     psbt.addOutput({ script: change === "vault-script" ? creatorScript : selectedVault.scriptPubKey, value: Number(curve.vaultSats - sell.grossSats) });
-    psbt.addOutput({ script: change === "payout-script" ? creatorScript : v2 && separateWallets && !v2.forgedPayout ? ordScript : walletScript, value: Number(sell.sellerPayoutSats) });
+    psbt.addOutput({ script: change === "payout-script" ? creatorScript : v2 && separateWallets && !v2.forgedPayout ? ordScript : walletScript, value: Number(sell.sellerPayoutSats + (v2 ? 330n : 0n)) });
     psbt.addOutput({ script: feeScript, value: Number(sell.protocolFeeSats + (change === "fee" ? 1n : 0n)) });
     if (v2 && (v2.sellerAtoms ?? 100_000_000_000n) > 100_000_000_000n)
       psbt.addOutput({ script: v2.forgedChange ? creatorScript : separateWallets ? ordScript : walletScript, value: 330 });
@@ -91,7 +91,7 @@ function fixture(kind: "mint-buy" | "inventory-buy" | "sell", change?: "fee" | "
     psbt.addOutput({ script: creatorScript, value: Number(buy.creatorFeeSats) });
   }
   psbt.signInput(1, sold && separateWallets ? ordWallet : wallet);
-  if (sold && separateWallets) psbt.signInput(2, wallet);
+  if (sold && (separateWallets || v2)) psbt.signInput(2, wallet);
   const snapshot = {
     network: "regtest" as const,
     deployTxid, ticker: "COVE", deployMarkerBytes: selectedDeployMarkerBytes, launchSalt,
@@ -107,7 +107,7 @@ function fixture(kind: "mint-buy" | "inventory-buy" | "sell", change?: "fee" | "
   };
   const prevouts = async (txid: string, vout: number) => {
     if (txid === vaultTxid && vout === 1) return { script: selectedVault.scriptPubKey, valueSats: curve.vaultSats, confirmations: 2 };
-    if (txid === walletTxid && vout === 0) return { script: sold && separateWallets ? ordScript : walletScript, valueSats: 10_000n, confirmations: 2 };
+    if (txid === walletTxid && vout === 0) return { script: sold && separateWallets ? ordScript : walletScript, valueSats: sold && v2 ? 330n : 10_000n, confirmations: 2 };
     if (txid === "ef".repeat(32) && vout === 0) return { script: walletScript, valueSats: 10_000n, confirmations: 2 };
     return null;
   };

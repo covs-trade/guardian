@@ -86,7 +86,7 @@ async function main() {
   };
   const custodyBackend = new TestGuardianCustodyBackend(guardianPriv);
   const ticker = `GS${randomBytes(3).toString("hex").toUpperCase()}`;
-  const deployMarker = Buffer.from(JSON.stringify({ p: "crc-20", op: "deploy", tick: ticker, type: "bonding", max: "2100000000000000", cv: "cove-curve-v1" }));
+  const deployMarker = Buffer.from(JSON.stringify({ p: "crc-20", op: "deploy", tick: ticker, type: "bonding", max: "2100000000000000", cv: "cove-curve-v2" }));
   const launchSalt = randomBytes(32);
   const vault = buildCrc20AssetVault({ asset: { deploymentTag: crc20DeploymentTag(deployMarker), launchSalt }, guardianXOnly, recoveryProfile, network: bitcoin.networks.regtest });
   const fundedTxid = await rpc.call("sendtoaddress", [walletAddress, 0.002], true);
@@ -115,13 +115,14 @@ async function main() {
   let synced = await syncCrcTip({ db, provider: core, network, activationHeight, protocolScriptHex });
   const assetId = `${network}:${deploy.getId()}`;
   same(synced.snapshot.state.assets[assetId]?.status, "live", "confirmed deploy");
+  same(synced.snapshot.state.assets[assetId]?.protocolVersion, 2, "confirmed v2 protocol");
   const service = new CrcGuardianSigningService({ db, core, custodyBackend, guardianXOnly, recoveryProfile, network, protocolScript: Buffer.from(protocolScriptHex, "hex"), maxMinerFeeSats: 20_000n });
   await service.probe();
   const buyPsbt = new bitcoin.Psbt({ network: bitcoin.networks.regtest });
   buyPsbt.setVersion(2);
   buyPsbt.addInput({ hash: deploy.getId(), index: 1, witnessUtxo: { script: vault.scriptPubKey, value: 330 }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
   buyPsbt.addInput({ hash: deploy.getId(), index: 4, witnessUtxo: { script: walletScript, value: 190_670 }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
-  buyPsbt.addOutput({ script: bitcoin.script.compile([bitcoin.opcodes.OP_RETURN, Buffer.from(JSON.stringify({ p: "crc-20", op: "mint", tick: ticker, amt: "100000000000", id: deploy.getId() }))]), value: 0 });
+  buyPsbt.addOutput({ script: bitcoin.script.compile([bitcoin.opcodes.OP_RETURN, Buffer.from(JSON.stringify({ p: "crc-20", op: "mint", tick: ticker, amt: "100000000000", id: deploy.getId(), v: 2 }))]), value: 0 });
   buyPsbt.addOutput({ script: walletScript, value: 330 });
   buyPsbt.addOutput({ script: vault.scriptPubKey, value: 357 });
   buyPsbt.addOutput({ script: Buffer.from(protocolScriptHex, "hex"), value: 5_013 });
@@ -140,27 +141,59 @@ async function main() {
   same(synced.snapshot.cursor?.hash, buyBlock, "indexed Guardian buy block");
   same(synced.snapshot.state.assets[assetId]?.curve.vaultOutpoint, `${buy.getId()}:2`, "indexed Guardian buy vault");
   same(synced.snapshot.state.assets[assetId]?.balances[walletScript.toString("hex")], "100000000000", "indexed Guardian buyer balance");
+  same(synced.snapshot.state.assets[assetId]?.tokenUtxos?.[`${buy.getId()}:1`]?.atoms, "100000000000", "indexed v2 buyer token outpoint");
+  const buyCoin = await db.execute(sql`select atoms::text, script_hex from cove_crc_token_utxos where network = 'regtest' and deploy_txid = ${deploy.getId()} and txid = ${buy.getId()} and vout = 1`);
+  same(buyCoin.rows[0]?.atoms, "100000000000", "persisted v2 buyer token outpoint");
+  same(buyCoin.rows[0]?.script_hex, walletScript.toString("hex"), "persisted v2 buyer owner");
   const curve = synced.snapshot.state.assets[assetId].curve;
   const sellQuote = quoteSell(curve, 1_000n, dustThreshold(walletScript));
   const sellerFundingSats = buy.outs[5].value;
-  const sellerChangeSats = Number(curve.vaultSats + BigInt(sellerFundingSats) -
-    (curve.vaultSats - sellQuote.grossSats + sellQuote.sellerPayoutSats + sellQuote.protocolFeeSats) - 1_000n);
+  const sellerChangeSats = Number(curve.vaultSats + BigInt(buy.outs[1].value) + BigInt(sellerFundingSats) -
+    (curve.vaultSats - sellQuote.grossSats + sellQuote.sellerPayoutSats + BigInt(buy.outs[1].value) + sellQuote.protocolFeeSats) - 1_000n);
   if (sellerChangeSats < Number(dustThreshold(walletScript))) throw new Error("sell change is below dust");
   const sellPsbt = new bitcoin.Psbt({ network: bitcoin.networks.regtest });
   sellPsbt.setVersion(2);
   sellPsbt.addInput({ hash: buy.getId(), index: 2, witnessUtxo: { script: vault.scriptPubKey, value: Number(curve.vaultSats) }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
+  sellPsbt.addInput({ hash: buy.getId(), index: 1, witnessUtxo: { script: walletScript, value: buy.outs[1].value }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
   sellPsbt.addInput({ hash: buy.getId(), index: 5, witnessUtxo: { script: walletScript, value: sellerFundingSats }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
-  sellPsbt.addOutput({ script: bitcoin.script.compile([bitcoin.opcodes.OP_RETURN, Buffer.from(JSON.stringify({ p: "crc-20", op: "transfer", tick: ticker, amt: "100000000000", id: deploy.getId() }))]), value: 0 });
+  sellPsbt.addOutput({ script: bitcoin.script.compile([bitcoin.opcodes.OP_RETURN, Buffer.from(JSON.stringify({ p: "crc-20", op: "transfer", tick: ticker, amt: "100000000000", id: deploy.getId(), v: 2 }))]), value: 0 });
   sellPsbt.addOutput({ script: vault.scriptPubKey, value: Number(curve.vaultSats - sellQuote.grossSats) });
-  sellPsbt.addOutput({ script: walletScript, value: Number(sellQuote.sellerPayoutSats) });
+  sellPsbt.addOutput({ script: walletScript, value: Number(sellQuote.sellerPayoutSats + BigInt(buy.outs[1].value)) });
   sellPsbt.addOutput({ script: Buffer.from(protocolScriptHex, "hex"), value: Number(sellQuote.protocolFeeSats) });
   sellPsbt.addOutput({ script: walletScript, value: sellerChangeSats });
   sellPsbt.signInput(1, wallet);
+  sellPsbt.signInput(2, wallet);
+  const substituted = new bitcoin.Psbt({ network: bitcoin.networks.regtest });
+  substituted.setVersion(2);
+  substituted.addInput({ hash: buy.getId(), index: 2, witnessUtxo: { script: vault.scriptPubKey, value: Number(curve.vaultSats) }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
+  substituted.addInput({ hash: buy.getId(), index: 5, witnessUtxo: { script: walletScript, value: sellerFundingSats }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
+  for (const output of sellPsbt.txOutputs) substituted.addOutput(output);
+  substituted.signInput(1, wallet);
+  const refusedSubstitution = await service.sign({ requestId: `regtest-${ticker}-substitution`, network, deploymentTxid: deploy.getId(), operation: "sell", psbtBase64: substituted.toBase64() });
+  if (refusedSubstitution.ok || !/token-bearing seller input/.test(refusedSubstitution.detail))
+    throw new Error(`Guardian accepted same-script BTC substitution: ${JSON.stringify(refusedSubstitution)}`);
+  const alteredBacking = new bitcoin.Psbt({ network: bitcoin.networks.regtest });
+  alteredBacking.setVersion(2);
+  alteredBacking.addInput({ hash: buy.getId(), index: 2, witnessUtxo: { script: vault.scriptPubKey, value: Number(curve.vaultSats) }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
+  alteredBacking.addInput({ hash: buy.getId(), index: 1, witnessUtxo: { script: walletScript, value: buy.outs[1].value }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
+  alteredBacking.addInput({ hash: buy.getId(), index: 5, witnessUtxo: { script: walletScript, value: sellerFundingSats }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
+  for (const [index, output] of sellPsbt.txOutputs.entries()) alteredBacking.addOutput({
+    script: output.script,
+    value: output.value + (index === 1 ? 1 : index === 4 ? -1 : 0),
+  });
+  alteredBacking.signInput(1, wallet);
+  alteredBacking.signInput(2, wallet);
+  const refusedBacking = await service.sign({ requestId: `regtest-${ticker}-backing`, network, deploymentTxid: deploy.getId(), operation: "sell", psbtBase64: alteredBacking.toBase64() });
+  if (refusedBacking.ok || !/backing, payout, or fee mismatch/.test(refusedBacking.detail))
+    throw new Error(`Guardian accepted invalid vault backing: ${JSON.stringify(refusedBacking)}`);
+  const rejectedJournal = await db.execute(sql`select count(*)::int as count from cove_crc_signing_journal where network = 'regtest' and deploy_txid = ${deploy.getId()}`);
+  same(rejectedJournal.rows[0]?.count, 1, "rejected v2 sells do not create signing journal rows");
   const signedSell = await service.sign({ requestId: `regtest-${ticker}-sell`, network, deploymentTxid: deploy.getId(), operation: "sell", psbtBase64: sellPsbt.toBase64() });
   if (!signedSell.ok) throw new Error(`Guardian rejected mined sell: ${signedSell.detail}`);
   const finalSellPsbt = bitcoin.Psbt.fromBase64(signedSell.signedPsbtBase64, { network: bitcoin.networks.regtest });
   if (!finalSellPsbt.data.inputs[0]?.finalScriptWitness) throw new Error("Guardian did not finalize sell vault witness");
   finalSellPsbt.finalizeInput(1);
+  finalSellPsbt.finalizeInput(2);
   const sell = finalSellPsbt.extractTransaction();
   same(await rpc.call("sendrawtransaction", [sell.toHex()]), sell.getId(), "Guardian sell broadcast");
   const sellBlock = await rpc.mine(miner.address);
@@ -170,7 +203,13 @@ async function main() {
   same(synced.snapshot.state.assets[assetId]?.curve.vaultSats, curve.vaultSats - sellQuote.grossSats, "indexed Guardian sell reserve");
   same(synced.snapshot.state.assets[assetId]?.curve.circulatingAtoms, 0n, "indexed Guardian circulating supply");
   same(synced.snapshot.state.assets[assetId]?.balances[walletScript.toString("hex")], "0", "indexed Guardian seller balance");
-  same(sell.outs[2]?.value, Number(sellQuote.sellerPayoutSats), "mined seller payout");
+  same(synced.snapshot.state.assets[assetId]?.tokenUtxos?.[`${buy.getId()}:1`], undefined, "sold token outpoint consumed");
+  same(synced.snapshot.state.assets[assetId]?.tokenUtxos?.[`${sell.getId()}:1`]?.atoms, "100000000000", "indexed v2 vault inventory outpoint");
+  const soldCoins = await db.execute(sql`select txid, vout, atoms::text from cove_crc_token_utxos where network = 'regtest' and deploy_txid = ${deploy.getId()} order by txid, vout`);
+  same(soldCoins.rows.length, 1, "one persisted v2 inventory outpoint after sell");
+  same(soldCoins.rows[0]?.txid, sell.getId(), "persisted v2 vault inventory txid");
+  same(soldCoins.rows[0]?.vout, 1, "persisted v2 vault inventory vout");
+  same(sell.outs[2]?.value, Number(sellQuote.sellerPayoutSats + BigInt(buy.outs[1].value)), "mined seller payout and returned carrier sats");
   same(sell.outs[2]?.script.toString("hex"), walletScript.toString("hex"), "mined seller payout script");
   const persisted = await hydrateCrcLedger(db, network);
   same(persisted.state.assets[assetId]?.curve.vaultSats, curve.vaultSats - sellQuote.grossSats, "persisted sell reserve");
@@ -178,7 +217,7 @@ async function main() {
   const chainVault = await rpc.call("gettxout", [sell.getId(), 1]);
   const chainPayout = await rpc.call("gettxout", [sell.getId(), 2]);
   same(chainVault ? Math.round(chainVault.value * 100_000_000) : null, Number(curve.vaultSats - sellQuote.grossSats), "Core sell vault output");
-  same(chainPayout ? Math.round(chainPayout.value * 100_000_000) : null, Number(sellQuote.sellerPayoutSats), "Core seller payout output");
+  same(chainPayout ? Math.round(chainPayout.value * 100_000_000) : null, Number(sellQuote.sellerPayoutSats + BigInt(buy.outs[1].value)), "Core seller payout output");
   const soldCurve = synced.snapshot.state.assets[assetId].curve;
   same(soldCurve.mintedAtoms, 100_000_000_000n, "supply after sell");
   same(soldCurve.vaultAtoms, 100_000_000_000n, "vault inventory after sell");
@@ -192,7 +231,7 @@ async function main() {
   inventoryPsbt.setVersion(2);
   inventoryPsbt.addInput({ hash: sell.getId(), index: 1, witnessUtxo: { script: vault.scriptPubKey, value: Number(soldCurve.vaultSats) }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
   inventoryPsbt.addInput({ hash: sell.getId(), index: 4, witnessUtxo: { script: walletScript, value: inventoryFundingSats }, sighashType: bitcoin.Transaction.SIGHASH_ALL });
-  inventoryPsbt.addOutput({ script: bitcoin.script.compile([bitcoin.opcodes.OP_RETURN, Buffer.from(JSON.stringify({ p: "crc-20", op: "transfer", tick: ticker, amt: "100000000000", id: deploy.getId() }))]), value: 0 });
+  inventoryPsbt.addOutput({ script: bitcoin.script.compile([bitcoin.opcodes.OP_RETURN, Buffer.from(JSON.stringify({ p: "crc-20", op: "transfer", tick: ticker, amt: "100000000000", id: deploy.getId(), v: 2 }))]), value: 0 });
   inventoryPsbt.addOutput({ script: walletScript, value: 330 });
   inventoryPsbt.addOutput({ script: vault.scriptPubKey, value: Number(soldCurve.vaultSats + inventoryQuote.grossSats) });
   inventoryPsbt.addOutput({ script: Buffer.from(protocolScriptHex, "hex"), value: Number(inventoryQuote.protocolFeeSats) });
@@ -215,6 +254,12 @@ async function main() {
   same(inventoryState?.curve.vaultAtoms, 0n, "inventory buy clears one lot");
   same(inventoryState?.curve.vaultSats, soldCurve.vaultSats + inventoryQuote.grossSats, "inventory buy reserve");
   same(inventoryState?.balances[walletScript.toString("hex")], "100000000000", "inventory buyer balance");
+  same(inventoryState?.tokenUtxos?.[`${inventoryBuy.getId()}:1`]?.atoms, "100000000000", "inventory buyer token outpoint");
+  same(inventoryState?.tokenUtxos?.[`${sell.getId()}:1`], undefined, "inventory vault token outpoint consumed");
+  const finalCoins = await db.execute(sql`select txid, vout, atoms::text from cove_crc_token_utxos where network = 'regtest' and deploy_txid = ${deploy.getId()} order by txid, vout`);
+  same(finalCoins.rows.length, 1, "one persisted v2 buyer outpoint after inventory buy");
+  same(finalCoins.rows[0]?.txid, inventoryBuy.getId(), "persisted inventory buyer token txid");
+  same(finalCoins.rows[0]?.vout, 1, "persisted inventory buyer token vout");
   same(inventoryBuy.outs[3]?.value, Number(inventoryQuote.protocolFeeSats), "inventory buy protocol fee");
   same(inventoryBuy.outs[4]?.value, Number(inventoryQuote.creatorFeeSats), "inventory buy creator fee");
   const persistedInventory = await hydrateCrcLedger(db, network);
@@ -231,6 +276,7 @@ async function main() {
   await db.execute(sql`delete from cove_crc_undo where network = 'regtest'`);
   await db.execute(sql`delete from cove_crc_blocks where network = 'regtest'`);
   await db.execute(sql`delete from cove_crc_balances where network = 'regtest'`);
+  await db.execute(sql`delete from cove_crc_token_utxos where network = 'regtest'`);
   await db.execute(sql`delete from cove_crc_vaults where network = 'regtest'`);
   await db.execute(sql`delete from cove_crc_assets where network = 'regtest'`);
   await db.execute(sql`delete from cove_crc_cursor where network = 'regtest'`);

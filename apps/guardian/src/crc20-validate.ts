@@ -110,6 +110,7 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
     params.tokenPrevouts!(Buffer.from(input.hash).reverse().toString("hex"), input.index))) : [];
   const authorityScript = psbt.data.inputs[1]!.witnessUtxo!.script;
   let sellerTokenCount = 0;
+  let sellerCarrierSats = 0n;
   if (v2) {
     const vaultRow = tokenRows[0];
     if (vaultRow && (vaultRow.deployTxid !== snapshot.deployTxid ||
@@ -128,6 +129,8 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
         sellerTokenCount++;
       }
       if (sellerTokenCount === 0) throw new Error("CRC sell requires token-bearing seller input");
+      sellerCarrierSats = psbt.data.inputs.slice(1, 1 + sellerTokenCount)
+        .reduce((sum, input) => sum + BigInt(input.witnessUtxo!.value), 0n);
       const selected = tokenRows.slice(1, 1 + sellerTokenCount).reduce((sum, row) => sum + row!.atoms, 0n);
       if (selected < preflight.amountAtoms) throw new Error("CRC seller token outpoints are insufficient");
       const remainder = selected - preflight.amountAtoms;
@@ -191,7 +194,7 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
     const payoutDust = dustThreshold(payoutScript);
     const quote = quoteSell(snapshot.curve, amountTokens, payoutDust);
     if (!exact(outputs[1], vault.scriptPubKey, snapshot.curve.vaultSats - quote.grossSats) ||
-      !exact(outputs[2], payoutScript, quote.sellerPayoutSats) ||
+      !exact(outputs[2], payoutScript, quote.sellerPayoutSats + sellerCarrierSats) ||
       !exact(outputs[3], snapshot.protocolScript, quote.protocolFeeSats))
       throw new Error("CRC sell backing, payout, or fee mismatch");
     grossSats = quote.grossSats;
