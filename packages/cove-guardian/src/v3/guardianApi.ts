@@ -124,6 +124,7 @@ export interface InProcessGuardianTransportOptions {
     psbt: bitcoin.Psbt;
   };
   loadView: (tokenId: string, psbt: bitcoin.Psbt) => Promise<CoveCanonicalView>;
+  loadTicker?: (tokenId: string) => Promise<string | undefined>;
   recoveryKeyXOnly: Buffer;
   recoveryProfile?: VaultRecoveryProfile;
   feeScript: Buffer;
@@ -198,6 +199,7 @@ export class InProcessGuardianTransport implements GuardianTransport {
       maxMinerFeeSats: this.opts.maxMinerFeeSats,
       buyFeeBps: this.opts.buyFeeBps,
       redeemFeeBps: this.opts.redeemFeeBps,
+      discoveryTicker: recovered ? undefined : await this.opts.loadTicker?.(req.tokenId),
       fundingChecker: this.opts.fundingChecker,
     };
     const outcome =

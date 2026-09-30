@@ -6,10 +6,10 @@ import {
   OP_TRANSFER,
   opName,
 } from "./opcodes.js";
-import { DATACARRIER_PAYLOAD_LIMIT } from "./opcodes.js";
 import type { ParsedEnvelopeV2 } from "./codecV2.js";
 import { canonicalTicker } from "./ticker.js";
 const KEY_ORDER = ["p", "op", "tick", "amt"] as const;
+export const DISCOVERY_PAYLOAD_LIMIT = 96;
 export interface DiscoveryEnvelope {
   p: string;
   op: string;
@@ -39,12 +39,7 @@ export function discoveryFor(binary: ParsedEnvelopeV2): DiscoveryEnvelope {
     case OP_DEPLOY:
       return { p: COVE_PROTOCOL_ID, op, tick: canonicalTicker(binary.ticker) };
     case OP_MINT:
-      return {
-        p: COVE_PROTOCOL_ID,
-        op,
-        tick: "",
-        amt: binary.amount.toString(),
-      };
+      return { p: COVE_PROTOCOL_ID, op, tick: "" };
     case OP_TRANSFER: {
       const total = binary.allocations.reduce((a, x) => a + x.amount, 0n);
       return { p: COVE_PROTOCOL_ID, op, tick: "", amt: total.toString() };
@@ -79,10 +74,10 @@ export function encodeDiscovery(
       }
     ).tick;
   const bytes = serializeDiscovery(env);
-  if (bytes.length > DATACARRIER_PAYLOAD_LIMIT) {
+  if (bytes.length > DISCOVERY_PAYLOAD_LIMIT) {
     throw new DiscoveryError(
       "DISCOVERY_TOO_LARGE",
-      `discovery envelope is ${bytes.length}B, limit ${DATACARRIER_PAYLOAD_LIMIT}B`,
+      `discovery envelope is ${bytes.length}B, limit ${DISCOVERY_PAYLOAD_LIMIT}B`,
     );
   }
   return bytes;
