@@ -86,7 +86,7 @@ export class CrcGuardianSigningService {
           and b.script_hex = ${payerScript.toString("hex")}
         where v.network = ${snapshot.network} and v.deploy_txid = ${snapshot.deployTxid}`);
       const row = result.rows[0];
-      if (!row || Number(row.protocol_version ?? 1) !== (snapshot.protocolVersion ?? 1) ||
+      if (!row || Number(row.protocol_version) !== 3 || snapshot.protocolVersion !== 3 ||
         row.txid !== snapshot.vaultOutpoint.txid || row.vout !== snapshot.vaultOutpoint.vout ||
         row.script_hex !== snapshot.vaultScript.toString("hex") ||
         String(row.btc_sats) !== snapshot.curve.vaultSats.toString() ||

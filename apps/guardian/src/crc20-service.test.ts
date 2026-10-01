@@ -18,7 +18,7 @@ function setup() {
   const walletScript = bitcoin.payments.p2wpkh({ pubkey: wallet.publicKey }).output!;
   const guardianXOnly = Buffer.from(ecc.pointFromScalar(guardianPriv, true)!).subarray(1);
   const recoveryProfile = dev1RecoveryProfile(Buffer.from(ecc.pointFromScalar(Buffer.alloc(32, 0x43), true)!).subarray(1));
-  const deployMarkerBytes = Buffer.from('{"p":"crc-20","op":"deploy","tick":"COVE","type":"bonding","max":"2100000000000000","cv":"cove-curve-v1"}');
+  const deployMarkerBytes = Buffer.from('{"p":"crc-20","op":"deploy","tick":"COVE","type":"bonding","max":"2100000000000000","cv":"cove-curve-v3"}');
   const launchSalt = Buffer.alloc(32, 0x45);
   const vault = buildCrc20AssetVault({ asset: { deploymentTag: crc20DeploymentTag(deployMarkerBytes), launchSalt }, guardianXOnly, recoveryProfile });
   const feeScript = Buffer.from(`0014${"33".repeat(20)}`, "hex");
@@ -36,7 +36,7 @@ function setup() {
     sighashType: bitcoin.Transaction.SIGHASH_ALL,
   });
   psbt.addOutput({ script: bitcoin.script.compile([bitcoin.opcodes.OP_RETURN!, Buffer.from(JSON.stringify({
-    p: "crc-20", op: "mint", tick: "COVE", amt: "100000000000", id: deployTxid,
+    p: "crc-20", op: "mint", tick: "COVE",
   }))]), value: 0 });
   psbt.addOutput({ script: walletScript, value: 330 });
   psbt.addOutput({ script: vault.scriptPubKey, value: 10_027 });
@@ -47,20 +47,22 @@ function setup() {
     network: "regtest" as const, deployTxid, ticker: "COVE", deployMarkerBytes, launchSalt,
     creatorScript, protocolScript: feeScript, vaultOutpoint: { txid: vaultTxid, vout: 1 },
     vaultScript: vault.scriptPubKey,
-    curve: { version: "cove-curve-v1" as const, mintedAtoms: 0n, vaultAtoms: 0n,
+    curve: { version: "cove-curve-v3" as const, mintedAtoms: 0n, vaultAtoms: 0n,
       circulatingAtoms: 0n, vaultAnchorSats: 10_000n, vaultSats: 10_000n,
       vaultOutpoint: `${vaultTxid}:1` },
-    sellerBalanceAtoms: 0n, cursorHeight: 100, cursorBlockHash: "dd".repeat(32), cursorStateRoot: "ee".repeat(32),
+    sellerBalanceAtoms: 0n, protocolVersion: 3 as const,
+    cursorHeight: 100, cursorBlockHash: "dd".repeat(32), cursorStateRoot: "ee".repeat(32),
   };
   loadSnapshot.mockResolvedValue(snapshot);
-  const stateRow = { txid: vaultTxid, vout: 1, script_hex: vault.scriptPubKey.toString("hex"),
+  const stateRow = { protocol_version: 3, txid: vaultTxid, vout: 1, script_hex: vault.scriptPubKey.toString("hex"),
     btc_sats: "10000", minted_atoms: "0", inventory_atoms: "0", availability: "active",
     cursor_height: "100", cursor_hash: snapshot.cursorBlockHash, state_root: snapshot.cursorStateRoot,
     seller_balance_atoms: "0" };
   let statements = 0;
   const db = { execute: vi.fn(async () => {
     statements++;
-    if (statements === 3 || statements === 5) return { rows: [{ unsigned_tx_digest: "ok" }] };
+    if (statements === 2 || statements === 3) return { rows: [] };
+    if (statements === 5 || statements === 7) return { rows: [{ unsigned_tx_digest: "ok" }] };
     return { rows: [stateRow] };
   }) };
   const core = {
@@ -73,7 +75,7 @@ function setup() {
   };
   const backend = new TestGuardianCustodyBackend(guardianPriv);
   const sign = vi.spyOn(backend, "signTaprootScriptPath").mockImplementation(async (params) => {
-    expect(statements).toBe(4);
+    expect(statements).toBe(6);
     return Buffer.from(ecc.signSchnorr(params.sighash, guardianPriv));
   });
   const service = new CrcGuardianSigningService({
@@ -98,7 +100,7 @@ describe("CRC Guardian signing coordinator", () => {
       operation: "mint-buy", psbtBase64: f.psbt.toBase64() });
     expect(result).toMatchObject({ ok: true });
     expect(f.sign).toHaveBeenCalledTimes(1);
-    expect(f.db.execute).toHaveBeenCalledTimes(5);
+    expect(f.db.execute).toHaveBeenCalledTimes(7);
     expect(f.core.getTxout).toHaveBeenCalledTimes(2);
     if (result.ok) {
       expect(result.unsignedTxDigest).toBe(createHash("sha256")
@@ -122,13 +124,13 @@ describe("CRC Guardian signing coordinator", () => {
     let calls = 0;
     f.db.execute.mockImplementation(async () => {
       calls++;
-      if (calls === 3) throw new Error("journal unavailable");
+      if (calls === 5) throw new Error("journal unavailable");
       return original();
     });
     const result = await f.service.sign({ requestId: "r3", network: "regtest", deploymentTxid: f.deployTxid,
       operation: "mint-buy", psbtBase64: f.psbt.toBase64() });
     expect(result).toMatchObject({ ok: false, reason: "CRC_SIGN_REJECTED" });
     expect(f.sign).not.toHaveBeenCalled();
-    expect(calls).toBe(3);
+    expect(calls).toBe(5);
   });
 });

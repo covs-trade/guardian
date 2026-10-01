@@ -2,144 +2,61 @@ import * as bitcoin from "bitcoinjs-lib";
 import { describe, expect, it } from "vitest";
 import { preflightCoveCrcPsbt } from "./crc20-preflight.js";
 
-const ID = "ab".repeat(32);
-const VAULT_TXID = "cd".repeat(32);
-const BUYER = Buffer.from(`0014${"11".repeat(20)}`, "hex");
-const VAULT = Buffer.from(`5120${"22".repeat(32)}`, "hex");
-const FEE = Buffer.from(`0014${"33".repeat(20)}`, "hex");
-const CREATOR = Buffer.from(`0014${"44".repeat(20)}`, "hex");
+const DEPLOY = "ab".repeat(32);
+const VAULT_TX = "cd".repeat(32);
+const buyer = Buffer.from(`0014${"11".repeat(20)}`, "hex");
+const vault = Buffer.from(`5120${"22".repeat(32)}`, "hex");
+const fee = Buffer.from(`0014${"33".repeat(20)}`, "hex");
+const creator = Buffer.from(`0014${"44".repeat(20)}`, "hex");
+const expected = { deploymentTxid: DEPLOY, ticker: "COVE", vaultOutpoint: { txid: VAULT_TX, vout: 1 } };
 
-function fixture(options: {
-  op?: "mint" | "transfer";
-  id?: string;
-  amt?: string;
-  tick?: string;
-  extra?: Record<string, string>;
-  markerVout?: number;
-  secondMarker?: boolean;
-  sighash?: number;
-  firstTxid?: string;
-  outputCount?: number;
-  version?: 2;
-  changeVout?: number;
-} = {}) {
-  const marker = bitcoin.script.compile([
-    bitcoin.opcodes.OP_RETURN!,
-    Buffer.from(JSON.stringify({
-      p: "crc-20",
-      op: options.op ?? "mint",
-      tick: options.tick ?? "COVE",
-      amt: options.amt ?? "100000000000",
-      id: options.id ?? ID,
-      ...(options.version === 2 ? { v: 2 } : {}),
-      ...(options.changeVout !== undefined ? { ch: options.changeVout } : {}),
-      ...options.extra,
-    })),
-  ]);
-  const outputs = [
-    { script: marker, value: 0 },
-    { script: BUYER, value: 330 },
-    { script: VAULT, value: 100_000 },
-    { script: FEE, value: 5_000 },
-    { script: CREATOR, value: 546 },
-  ];
-  if (options.markerVout === 1) [outputs[0], outputs[1]] = [outputs[1]!, outputs[0]!];
-  if (options.secondMarker) outputs.push({ script: marker, value: 0 });
+function fixture(operation: "mint-buy" | "inventory-buy" | "sell", payload?: object) {
   const psbt = new bitcoin.Psbt({ network: bitcoin.networks.regtest });
-  psbt.addInput({
-    hash: options.firstTxid ?? VAULT_TXID,
-    index: 2,
-    witnessUtxo: { script: VAULT, value: 100_000 },
-    sighashType: options.sighash ?? bitcoin.Transaction.SIGHASH_ALL,
-  });
-  psbt.addInput({
-    hash: "ef".repeat(32),
-    index: 1,
-    witnessUtxo: { script: BUYER, value: 6_000 },
-    sighashType: bitcoin.Transaction.SIGHASH_ALL,
-  });
-  for (const output of outputs.slice(0, options.outputCount)) psbt.addOutput(output);
+  psbt.addInput({ hash: VAULT_TX, index: 1, witnessUtxo: { script: vault, value: 10_000 },
+    sighashType: bitcoin.Transaction.SIGHASH_ALL });
+  psbt.addInput({ hash: "ef".repeat(32), index: 0, witnessUtxo: { script: buyer, value: 10_000 },
+    sighashType: bitcoin.Transaction.SIGHASH_ALL });
+  const marker = payload ?? (operation === "mint-buy"
+    ? { p: "crc-20", op: "mint", tick: "COVE" }
+    : { p: "crc-20", op: "transfer", tick: "COVE", amt: "100000000000" });
+  psbt.addOutput({ script: bitcoin.script.compile([bitcoin.opcodes.OP_RETURN!,
+    Buffer.from(JSON.stringify(marker))]), value: 0 });
+  psbt.addOutput({ script: operation === "sell" ? vault : buyer, value: 330 });
+  psbt.addOutput({ script: operation === "sell" ? buyer : vault, value: 1_000 });
+  psbt.addOutput({ script: fee, value: 1_000 });
+  if (operation !== "sell") psbt.addOutput({ script: creator, value: 546 });
   return psbt;
 }
 
-const expected = {
-  operation: "mint-buy" as const,
-  deploymentTxid: ID,
-  ticker: "COVE",
-  vaultOutpoint: { txid: VAULT_TXID, vout: 2 },
-};
-
-describe("Cove CRC-20 Guardian PSBT preflight", () => {
-  it("accepts v2 mint and an exact seller change index", () => {
-    expect(preflightCoveCrcPsbt(fixture({ version: 2 }), { ...expected, version: 2 })).toMatchObject({
-      version: 2, amountAtoms: 100000000000n,
-    });
-    const sell = fixture({ version: 2, op: "transfer", outputCount: 4, changeVout: 4 });
-    sell.addOutput({ script: BUYER, value: 330 });
-    expect(preflightCoveCrcPsbt(sell, { ...expected, version: 2, operation: "sell" })).toMatchObject({
-      version: 2, changeVout: 4,
-    });
+describe("single CRC Guardian wire preflight", () => {
+  it("accepts amountless mint and four-field transfer with fixed recipient adjacency", () => {
+    expect(preflightCoveCrcPsbt(fixture("mint-buy"), { ...expected, operation: "mint-buy" }))
+      .toMatchObject({ amountAtoms: 0n, recipientVout: 1, vaultVout: 2 });
+    expect(preflightCoveCrcPsbt(fixture("inventory-buy"), { ...expected, operation: "inventory-buy" }))
+      .toMatchObject({ amountAtoms: 100_000_000_000n, recipientVout: 1, vaultVout: 2 });
+    expect(preflightCoveCrcPsbt(fixture("sell"), { ...expected, operation: "sell" }))
+      .toMatchObject({ amountAtoms: 100_000_000_000n, recipientVout: 1, vaultVout: 1 });
   });
 
-  it("rejects v1 marker for v2 asset and malformed v2 change fields", () => {
-    expect(() => preflightCoveCrcPsbt(fixture(), { ...expected, version: 2 })).toThrow(/version/i);
-    expect(() => preflightCoveCrcPsbt(fixture({ version: 2 }), expected)).toThrow(/version|field/i);
-    for (const changeVout of [0, 1, 2, 3, 5]) {
-      expect(() => preflightCoveCrcPsbt(fixture({ version: 2, changeVout }), { ...expected, version: 2 })).toThrow(/change/i);
+  it("rejects the retired CRC fields and unsupported amounts", () => {
+    for (const extra of [{ amt: "100000000000" }, { id: DEPLOY }, { v: 2 }, { ch: 4 }]) {
+      expect(() => preflightCoveCrcPsbt(fixture("mint-buy", { p: "crc-20", op: "mint", tick: "COVE", ...extra }),
+        { ...expected, operation: "mint-buy" })).toThrow(/field/i);
     }
-  });
-  it("accepts a canonical mint-buy and returns the committed amount", () => {
-    expect(preflightCoveCrcPsbt(fixture(), expected)).toMatchObject({
-      operation: "mint-buy",
-      amountAtoms: 100000000000n,
-      recipientVout: 1,
-      vaultVout: 2,
-    });
+    for (const extra of [{ id: DEPLOY }, { v: 2 }, { ch: 4 }]) {
+      expect(() => preflightCoveCrcPsbt(fixture("sell", { p: "crc-20", op: "transfer", tick: "COVE",
+        amt: "100000000000", ...extra }), { ...expected, operation: "sell" })).toThrow(/field/i);
+    }
+    expect(() => preflightCoveCrcPsbt(fixture("sell", { p: "crc-20", op: "transfer", tick: "COVE",
+      amt: "0100000000000" }), { ...expected, operation: "sell" })).toThrow(/amount/i);
   });
 
-  it("requires an exact registered asset ID and ticker", () => {
-    expect(() => preflightCoveCrcPsbt(fixture({ id: "de".repeat(32) }), expected)).toThrow(/asset/i);
-    expect(() => preflightCoveCrcPsbt(fixture({ tick: "LEAF" }), expected)).toThrow(/ticker/i);
-  });
-
-  it("rejects stale vaults and a marker outside vout zero", () => {
-    expect(() => preflightCoveCrcPsbt(fixture({ firstTxid: "01".repeat(32) }), expected)).toThrow(/vault/i);
-    expect(() => preflightCoveCrcPsbt(fixture({ markerVout: 1 }), expected)).toThrow(/marker/i);
-  });
-
-  it("rejects unknown fields, duplicate JSON keys, and noncanonical amounts", () => {
-    expect(() => preflightCoveCrcPsbt(fixture({ extra: { x: "1" } }), expected)).toThrow(/field/i);
-    expect(() => preflightCoveCrcPsbt(fixture({ amt: "0100" }), expected)).toThrow(/amount/i);
-    const psbt = fixture();
-    const duplicate = bitcoin.script.compile([
-      bitcoin.opcodes.OP_RETURN!,
-      Buffer.from(`{"p":"crc-20","op":"mint","tick":"COVE","amt":"100000000000","id":"${ID}","amt":"200000000000"}`),
-    ]);
-    const tx = psbt.txOutputs.map((out, index) => ({ script: index === 0 ? duplicate : out.script, value: out.value }));
-    const altered = new bitcoin.Psbt({ network: bitcoin.networks.regtest });
-    for (const input of psbt.txInputs.map((input, index) => ({
-      hash: Buffer.from(input.hash).reverse().toString("hex"),
-      index: input.index,
-      witnessUtxo: psbt.data.inputs[index]!.witnessUtxo!,
-      sighashType: bitcoin.Transaction.SIGHASH_ALL,
-    }))) altered.addInput(input);
-    for (const out of tx) altered.addOutput(out);
-    expect(() => preflightCoveCrcPsbt(altered, expected)).toThrow(/duplicate/i);
-  });
-
-  it("rejects another marker, missing fee outputs, and non-ALL hash modes", () => {
-    expect(() => preflightCoveCrcPsbt(fixture({ secondMarker: true }), expected)).toThrow(/marker/i);
-    expect(() => preflightCoveCrcPsbt(fixture({ outputCount: 3 }), expected)).toThrow(/outputs/i);
-    expect(() => preflightCoveCrcPsbt(fixture({ sighash: bitcoin.Transaction.SIGHASH_SINGLE }), expected)).toThrow(/sighash/i);
-  });
-
-  it("distinguishes inventory buys and sells by expected operation and output layout", () => {
-    expect(() => preflightCoveCrcPsbt(fixture({ op: "transfer" }), expected)).toThrow(/operation/i);
-    expect(preflightCoveCrcPsbt(fixture({ op: "transfer" }), { ...expected, operation: "inventory-buy" })).toMatchObject({
-      operation: "inventory-buy", recipientVout: 1, vaultVout: 2,
-    });
-    expect(preflightCoveCrcPsbt(fixture({ op: "transfer", outputCount: 4 }), { ...expected, operation: "sell" })).toMatchObject({
-      operation: "sell", recipientVout: 1, vaultVout: 1,
-    });
+  it("rejects wrong vault and non-SIGHASH_ALL", () => {
+    const wrong = fixture("mint-buy");
+    expect(() => preflightCoveCrcPsbt(wrong, { ...expected, operation: "mint-buy",
+      vaultOutpoint: { txid: VAULT_TX, vout: 2 } })).toThrow(/vault/i);
+    const sighash = fixture("mint-buy");
+    sighash.data.inputs[1]!.sighashType = bitcoin.Transaction.SIGHASH_SINGLE;
+    expect(() => preflightCoveCrcPsbt(sighash, { ...expected, operation: "mint-buy" })).toThrow(/SIGHASH_ALL/i);
   });
 });

@@ -7,7 +7,6 @@ export interface CrcPreflightExpectation {
   deploymentTxid: string;
   ticker: string;
   vaultOutpoint: { txid: string; vout: number };
-  version?: 1 | 2;
 }
 
 export interface CrcPreflightResult {
@@ -17,8 +16,6 @@ export interface CrcPreflightResult {
   vaultVout: 1 | 2;
   recipientScript: Buffer;
   vaultScript: Buffer;
-  version: 1 | 2;
-  changeVout?: number;
 }
 
 const LOT_ATOMS = 100_000_000_000n;
@@ -57,24 +54,20 @@ export function preflightCoveCrcPsbt(
     throw new Error("invalid trusted asset or vault reference");
   const payload = markerPayload(psbt);
   const keys = Object.keys(payload);
-  const version = expected.version ?? 1;
-  if (version === 2 && payload.v !== 2 || version === 1 && "v" in payload)
-    throw new Error("CRC marker version mismatch");
-  const allowed = version === 2 ? ["p", "op", "tick", "amt", "id", "v", "ch"] : ["p", "op", "tick", "amt", "id"];
-  if (keys.length < (version === 2 ? 6 : 5) || keys.length > (version === 2 ? 7 : 5) ||
-    keys.some((key) => !allowed.includes(key)))
+  const canonicalKeys = expected.operation === "mint-buy" ? ["p", "op", "tick"] : ["p", "op", "tick", "amt"];
+  if (keys.length !== canonicalKeys.length || keys.some((key) => !canonicalKeys.includes(key)))
     throw new Error("CRC marker has unknown or missing field");
-  const canonicalKeys = version === 2 ? ["p", "op", "tick", "amt", "id", "v", ...(payload.ch === undefined ? [] : ["ch"])] : ["p", "op", "tick", "amt", "id"];
   if (keys.join(",") !== canonicalKeys.join(","))
     throw new Error("CRC marker field order mismatch");
   if (payload.p !== "crc-20") throw new Error("invalid CRC marker protocol");
   const requiredOp = expected.operation === "mint-buy" ? "mint" : "transfer";
   if (payload.op !== requiredOp) throw new Error("CRC operation mismatch");
-  if (payload.id !== expected.deploymentTxid) throw new Error("CRC asset ID mismatch");
   if (payload.tick !== expected.ticker) throw new Error("CRC ticker mismatch");
-  if (typeof payload.amt !== "string" || !/^[1-9][0-9]*$/.test(payload.amt))
+  if (expected.operation !== "mint-buy") {
+    if (typeof payload.amt !== "string" || !/^[1-9][0-9]*$/.test(payload.amt))
     throw new Error("invalid CRC amount");
-  const amountAtoms = BigInt(payload.amt);
+  }
+  const amountAtoms = expected.operation === "mint-buy" ? 0n : BigInt(payload.amt as string);
   if (amountAtoms > MAX_ATOMS || amountAtoms % LOT_ATOMS !== 0n)
     throw new Error("invalid CRC amount lot or cap");
 
@@ -97,12 +90,9 @@ export function preflightCoveCrcPsbt(
 
   const outputs = psbt.txOutputs;
   const required = expected.operation === "sell" ? 4 : 5;
-  const maxOutputs = required + (version === 2 && expected.operation === "sell" && payload.ch !== undefined ? 2 : 1);
+  const maxOutputs = required + (expected.operation === "sell" ? 2 : 1);
   if (outputs.length < required || outputs.length > maxOutputs)
     throw new Error("wrong number of CRC trade outputs");
-  if (payload.ch !== undefined && (version !== 2 || expected.operation !== "sell" ||
-    !Number.isInteger(payload.ch) || payload.ch !== 4 || outputs.length < 5))
-    throw new Error("invalid CRC token change index");
   if (outputs.slice(1).some((out) => out.script[0] === bitcoin.opcodes.OP_RETURN))
     throw new Error("multiple CRC markers or unexpected OP_RETURN");
   const vaultVout = expected.operation === "sell" ? 1 : 2;
@@ -116,7 +106,5 @@ export function preflightCoveCrcPsbt(
     vaultVout,
     recipientScript: outputs[1]!.script,
     vaultScript: outputs[vaultVout]!.script,
-    version,
-    ...(payload.ch === undefined ? {} : { changeVout: payload.ch as number }),
   };
 }

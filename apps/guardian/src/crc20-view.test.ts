@@ -10,7 +10,7 @@ const vaultScript = `5120${"11".repeat(32)}`;
 const creatorScript = `0014${"22".repeat(20)}`;
 const protocolScript = `0014${"33".repeat(20)}`;
 
-function fixture(version: 1 | 2 = 1) {
+function fixture(version: 2 | 3 = 3) {
   const marker = bitcoin.script.compile([bitcoin.opcodes.OP_RETURN!, Buffer.from(JSON.stringify({
     p: "crc-20", op: "deploy", tick: ticker, type: "bonding", max: "2100000000000000", cv: `cove-curve-v${version}`,
   }))]);
@@ -39,12 +39,12 @@ function fixture(version: 1 | 2 = 1) {
 }
 
 describe("trusted CRC DB row parsing", () => {
-  it("binds v2 deploy marker to the registered protocol version", () => {
-    const f = fixture(2);
+  it("binds the single deploy marker to the registered protocol version", () => {
+    const f = fixture(3);
     expect(parseCrcSnapshotRow(f.row, network, f.deployTxid, protocolScript)).toMatchObject({
-      protocolVersion: 2, curve: { version: "cove-curve-v2" },
+      protocolVersion: 3, curve: { version: "cove-curve-v3" },
     });
-    expect(() => parseCrcSnapshotRow({ ...f.row, protocol_version: 1 }, network, f.deployTxid, protocolScript)).toThrow(/version/i);
+    expect(() => parseCrcSnapshotRow({ ...f.row, protocol_version: 2 }, network, f.deployTxid, protocolScript)).toThrow(/version/i);
   });
   it("binds confirmed deployment, launch intent, current vault and curve state", () => {
     const f = fixture();

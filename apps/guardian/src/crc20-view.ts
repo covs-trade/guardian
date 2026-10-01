@@ -44,8 +44,8 @@ export function parseCrcSnapshotRow(
   try { payload = JSON.parse(marker.toString("utf8")) as Record<string, unknown>; }
   catch { throw new Error("CRC launch marker JSON is invalid"); }
   const ticker = stringField(row, "ticker");
-  const protocolVersion = Number(row.protocol_version ?? 1);
-  if (protocolVersion !== 1 && protocolVersion !== 2)
+  const protocolVersion = Number(row.protocol_version);
+  if (protocolVersion !== 3)
     throw new Error("CRC registered protocol version is invalid");
   if (payload.p !== "crc-20" || payload.op !== "deploy" || payload.tick !== ticker ||
     payload.type !== "bonding" || payload.max !== "2100000000000000" ||
@@ -98,7 +98,7 @@ export function parseCrcSnapshotRow(
     vaultOutpoint: { txid: vaultTxid, vout: vaultVout },
     vaultScript: Buffer.from(vaultScriptHex, "hex"),
     curve: {
-      version: `cove-curve-v${protocolVersion}` as "cove-curve-v1" | "cove-curve-v2", mintedAtoms, vaultAtoms, circulatingAtoms,
+      version: "cove-curve-v3" as const, mintedAtoms, vaultAtoms, circulatingAtoms,
       vaultAnchorSats: anchorSats, vaultSats, vaultOutpoint: `${vaultTxid}:${vaultVout}`,
     },
     sellerBalanceAtoms: atoms(row, "seller_balance_atoms"),

@@ -16,7 +16,7 @@ export interface CrcTrustedSnapshot {
   vaultOutpoint: { txid: string; vout: number };
   vaultScript: Buffer;
   curve: CurveState;
-  protocolVersion?: 1 | 2;
+  protocolVersion: 3;
   sellerBalanceAtoms: bigint;
   cursorHeight: number;
   cursorBlockHash: string;
@@ -66,6 +66,30 @@ function bitcoinNetwork(network: CrcTrustedSnapshot["network"]): bitcoin.network
     network === "regtest" ? bitcoin.networks.regtest : bitcoin.networks.testnet;
 }
 
+function inferredMintAtoms(curve: CurveState, outputs: bitcoin.Transaction["outs"]): bigint {
+  const successor = outputs[2];
+  if (!successor) throw new Error("CRC mint successor reserve is missing");
+  const gross = BigInt(successor.value) - curve.vaultSats;
+  if (gross <= 0n) throw new Error("CRC mint backing delta is invalid");
+  const capLots = (2_100_000_000_000_000n - curve.mintedAtoms) / 100_000_000_000n;
+  let low = 1n;
+  let high = capLots;
+  while (low <= high) {
+    const middle = (low + high) / 2n;
+    const quote = quoteBuy(curve, middle * 1_000n);
+    if (quote.operation !== "mint") throw new Error("CRC amountless mint is outside mint phase");
+    if (quote.grossSats < gross) low = middle + 1n;
+    else if (quote.grossSats > gross) high = middle - 1n;
+    else {
+      if (middle > 1n && quoteBuy(curve, (middle - 1n) * 1_000n).grossSats === gross ||
+        middle < capLots && quoteBuy(curve, (middle + 1n) * 1_000n).grossSats === gross)
+        throw new Error("CRC mint amount is ambiguous");
+      return quote.amountAtoms;
+    }
+  }
+  throw new Error("CRC mint backing delta has no legal amount");
+}
+
 export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promise<ValidatedCrcTrade> {
   const { psbt, snapshot, operation } = params;
   if (!/^[0-9a-f]{64}$/.test(snapshot.deployTxid) ||
@@ -75,7 +99,7 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
     throw new Error("invalid trusted CRC snapshot");
   if (snapshot.curve.vaultOutpoint !== `${snapshot.vaultOutpoint.txid}:${snapshot.vaultOutpoint.vout}` ||
     snapshot.curve.vaultSats <= 0n ||
-    snapshot.curve.version !== `cove-curve-v${snapshot.protocolVersion ?? 1}`)
+    snapshot.protocolVersion !== 3 || snapshot.curve.version !== "cove-curve-v3")
     throw new Error("CRC vault state and outpoint mismatch");
   const vault = buildCrc20AssetVault({
     asset: { deploymentTag: crc20DeploymentTag(snapshot.deployMarkerBytes), launchSalt: snapshot.launchSalt },
@@ -92,7 +116,6 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
     deploymentTxid: snapshot.deployTxid,
     ticker: snapshot.ticker,
     vaultOutpoint: snapshot.vaultOutpoint,
-    version: snapshot.protocolVersion ?? 1,
   });
   const first = psbt.data.inputs[0]!;
   if (!first.witnessUtxo?.script.equals(vault.scriptPubKey) ||
@@ -104,14 +127,15 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
       !first.tapLeafScript[0]!.controlBlock.equals(vault.executionControlBlock))))
     throw new Error("CRC vault PSBT commitment mismatch");
 
-  const v2 = (snapshot.protocolVersion ?? 1) === 2;
-  if (v2 && !params.tokenPrevouts) throw new Error("CRC v2 token outpoint lookup is unavailable");
-  const tokenRows = v2 ? await Promise.all(psbt.txInputs.map((input) =>
-    params.tokenPrevouts!(Buffer.from(input.hash).reverse().toString("hex"), input.index))) : [];
+  if (!params.tokenPrevouts) throw new Error("CRC token outpoint lookup is unavailable");
+  const tokenRows = await Promise.all(psbt.txInputs.map((input) =>
+    params.tokenPrevouts!(Buffer.from(input.hash).reverse().toString("hex"), input.index)));
   const authorityScript = psbt.data.inputs[1]!.witnessUtxo!.script;
   let sellerTokenCount = 0;
   let sellerCarrierSats = 0n;
-  if (v2) {
+  const amountAtoms = operation === "mint-buy"
+    ? inferredMintAtoms(snapshot.curve, psbt.txOutputs) : preflight.amountAtoms;
+  {
     const vaultRow = tokenRows[0];
     if (vaultRow && (vaultRow.deployTxid !== snapshot.deployTxid ||
       !vaultRow.script.equals(vault.scriptPubKey) || vaultRow.atoms !== snapshot.curve.vaultAtoms))
@@ -132,10 +156,11 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
       sellerCarrierSats = psbt.data.inputs.slice(1, 1 + sellerTokenCount)
         .reduce((sum, input) => sum + BigInt(input.witnessUtxo!.value), 0n);
       const selected = tokenRows.slice(1, 1 + sellerTokenCount).reduce((sum, row) => sum + row!.atoms, 0n);
-      if (selected < preflight.amountAtoms) throw new Error("CRC seller token outpoints are insufficient");
-      const remainder = selected - preflight.amountAtoms;
-      if (remainder > 0n && preflight.changeVout !== 4 || remainder === 0n && preflight.changeVout !== undefined)
-        throw new Error("CRC seller token change marker mismatch");
+      if (selected < amountAtoms) throw new Error("CRC seller token outpoints are insufficient");
+      const remainder = selected - amountAtoms;
+      if (remainder > 0n && (psbt.txOutputs.length < 5 || psbt.txOutputs.length > 6) ||
+        remainder === 0n && psbt.txOutputs.length > 5)
+        throw new Error("CRC seller token change output count mismatch");
       if (remainder > 0n && !psbt.txOutputs[4]?.script.equals(authorityScript))
         throw new Error("CRC seller token change output has wrong owner");
     }
@@ -146,7 +171,7 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
   const payerIndex = operation === "sell" ? 1 + Math.max(sellerTokenCount, 1) : 1;
   const paymentScript = operation === "sell" && psbt.data.inputs[payerIndex]?.witnessUtxo
     ? psbt.data.inputs[payerIndex]!.witnessUtxo!.script : authorityScript;
-  const payoutScript = v2 && operation === "sell" ? authorityScript : paymentScript;
+  const payoutScript = operation === "sell" ? authorityScript : paymentScript;
   let inputSats = 0n;
   for (let index = 0; index < psbt.txInputs.length; index++) {
     const input = psbt.txInputs[index]!;
@@ -184,12 +209,10 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
   const minerFeeSats = inputSats - outputSats;
   if (minerFeeSats < 0n || minerFeeSats > params.maxMinerFeeSats)
     throw new Error("CRC miner fee is outside policy cap");
-  const amountTokens = preflight.amountAtoms / 100_000_000n;
+  const amountTokens = amountAtoms / 100_000_000n;
   let grossSats: bigint;
   let protocolFeeSats: bigint;
   if (operation === "sell") {
-    if (!v2 && snapshot.sellerBalanceAtoms < preflight.amountAtoms)
-      throw new Error("CRC seller token balance is insufficient");
     if (!spendKindOf(payoutScript)) throw new Error("CRC payout script is unsupported");
     const payoutDust = dustThreshold(payoutScript);
     const quote = quoteSell(snapshot.curve, amountTokens, payoutDust);
@@ -212,7 +235,8 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
     grossSats = quote.grossSats;
     protocolFeeSats = quote.protocolFeeSats;
   }
-  const changeVout = operation === "sell" ? (preflight.changeVout === 4 ? 5 : 4) : 5;
+  const changeVout = operation === "sell" ? psbt.txOutputs.length >= 5 && sellerTokenCount > 0 &&
+      tokenRows.slice(1, 1 + sellerTokenCount).reduce((sum, row) => sum + row!.atoms, 0n) > amountAtoms ? 5 : 4 : 5;
   if (outputs[changeVout] && !outputs[changeVout]!.script.equals(paymentScript))
     throw new Error("CRC change output is not owned by payer");
   await params.assertCurrent?.();
@@ -225,6 +249,6 @@ export async function validateCrc20Trade(params: ValidateCrcTradeParams): Promis
       controlBlock: vault.executionControlBlock,
     }] } : {}),
   });
-  return { operation, amountAtoms: preflight.amountAtoms, grossSats, protocolFeeSats, minerFeeSats,
+  return { operation, amountAtoms, grossSats, protocolFeeSats, minerFeeSats,
     nextVaultVout: operation === "sell" ? 1 : 2 };
 }
