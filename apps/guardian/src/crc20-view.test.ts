@@ -10,9 +10,10 @@ const vaultScript = `5120${"11".repeat(32)}`;
 const creatorScript = `0014${"22".repeat(20)}`;
 const protocolScript = `0014${"33".repeat(20)}`;
 
-function fixture(version: 2 | 3 = 3) {
+function fixture() {
   const marker = bitcoin.script.compile([bitcoin.opcodes.OP_RETURN!, Buffer.from(JSON.stringify({
-    p: "crc-20", op: "deploy", tick: ticker, type: "bonding", max: "2100000000000000", cv: `cove-curve-v${version}`,
+    p: "crc-20", op: "deploy", tick: ticker, type: "bonding", max: "2100000000000000",
+    lim: "2100000000000000", leaf: "0", ordi: "0", btc: "1",
   }))]);
   const tx = new bitcoin.Transaction();
   tx.addInput(Buffer.alloc(32, 0x44), 0);
@@ -23,7 +24,7 @@ function fixture(version: 2 | 3 = 3) {
   const signedRawHex = tx.toHex();
   const deployTxid = tx.getId();
   return { deployTxid, row: {
-    ticker, protocol_version: version, creator_script_hex: creatorScript, protocol_script_hex: protocolScript,
+    ticker, protocol_version: 3, creator_script_hex: creatorScript, protocol_script_hex: protocolScript,
     launch_salt_hex: salt, intent_salt_hex: salt,
     signed_raw_hex: signedRawHex,
     raw_sha256: createHash("sha256").update(Buffer.from(signedRawHex, "hex")).digest("hex"),
@@ -40,7 +41,7 @@ function fixture(version: 2 | 3 = 3) {
 
 describe("trusted CRC DB row parsing", () => {
   it("binds the single deploy marker to the registered protocol version", () => {
-    const f = fixture(3);
+    const f = fixture();
     expect(parseCrcSnapshotRow(f.row, network, f.deployTxid, protocolScript)).toMatchObject({
       protocolVersion: 3, curve: { version: "cove-curve-v3" },
     });

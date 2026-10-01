@@ -15,7 +15,7 @@ const creatorScript = Buffer.from(`0014${"44".repeat(20)}`, "hex");
 const guardianXOnly = Buffer.from(ecc.pointFromScalar(Buffer.alloc(32, 0x41), true)!).subarray(1);
 const ownerXOnly = Buffer.from(ecc.pointFromScalar(Buffer.alloc(32, 0x43), true)!).subarray(1);
 const recoveryProfile = dev1RecoveryProfile(ownerXOnly);
-const deployMarkerBytes = Buffer.from('{"p":"crc-20","op":"deploy","tick":"COVE","type":"bonding","max":"2100000000000000","cv":"cove-curve-v3"}');
+const deployMarkerBytes = Buffer.from('{"p":"crc-20","op":"deploy","tick":"COVE","type":"bonding","max":"2100000000000000","lim":"2100000000000000","leaf":"0","ordi":"0","btc":"1"}');
 const launchSalt = Buffer.alloc(32, 0x45);
 const vault = buildCrc20AssetVault({
   asset: { deploymentTag: crc20DeploymentTag(deployMarkerBytes), launchSalt },

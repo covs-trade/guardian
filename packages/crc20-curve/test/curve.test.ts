@@ -7,7 +7,7 @@ import {
   isCoveCurveDeploy,
   quoteBuy,
   quoteSell,
-  requiredBackingV1,
+  requiredBacking,
   type CurveState,
 } from "../src/index.js";
 
@@ -47,9 +47,12 @@ describe("CRC-first Cove curve state", () => {
     expect(
       isCoveCurveDeploy({ p: "crc-20", op: "deploy", tick: "COVE", cv: "cove-curve-v3" }),
     ).toBe(false);
-    expect(isCoveCurveDeploy({ p: "crc-20", op: "deploy", tick: "COVE", type: "bonding", max: "2100000000000000", cv: "cove-curve-v3" })).toBe(true);
-    expect(isCoveCurveDeploy({ p: "crc-20", op: "deploy", tick: "COVE", type: "bonding", max: "2100000000000000", cv: "cove-curve-v2" })).toBe(false);
-    expect(isCoveCurveDeploy({ p: "crc-20", op: "deploy", tick: "COVE", type: "bonding", max: "2100000000000001", cv: "cove-curve-v3" })).toBe(false);
+    const deploy = { p: "crc-20", op: "deploy", tick: "COVE", type: "bonding",
+      max: "2100000000000000", lim: "2100000000000000", leaf: "0", ordi: "0", btc: "1" };
+    expect(isCoveCurveDeploy(deploy)).toBe(true);
+    expect(isCoveCurveDeploy({ ...deploy, cv: "cove-curve-v3" })).toBe(false);
+    expect(isCoveCurveDeploy({ ...deploy, max: "2100000000000001" })).toBe(false);
+    expect(isCoveCurveDeploy({ ...deploy, btc: "2" })).toBe(false);
     expect(isCoveCurveDeploy({ p: "crc-20", op: "mint", tick: "COVE", cv: "cove-curve-v3" })).toBe(
       false,
     );
@@ -89,8 +92,8 @@ describe("CRC-first Cove curve state", () => {
   it("matches the original reserve at every stage boundary while freezing v1 constants", () => {
     for (let stage = 0n; stage <= 210n; stage++) {
       const supply = stage * 100_000n;
-      expect(requiredBackingV1(supply)).toBe(requiredBackingSats(supply));
-      if (stage < 210n) expect(requiredBackingV1(supply + 1_000n)).toBe(requiredBackingSats(supply + 1_000n));
+      expect(requiredBacking(supply)).toBe(requiredBackingSats(supply));
+      if (stage < 210n) expect(requiredBacking(supply + 1_000n)).toBe(requiredBackingSats(supply + 1_000n));
     }
   });
 

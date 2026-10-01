@@ -86,7 +86,7 @@ async function main() {
   };
   const custodyBackend = new TestGuardianCustodyBackend(guardianPriv);
   const ticker = `GS${randomBytes(3).toString("hex").toUpperCase()}`;
-  const deployMarker = Buffer.from(JSON.stringify({ p: "crc-20", op: "deploy", tick: ticker, type: "bonding", max: "2100000000000000", cv: "cove-curve-v3" }));
+  const deployMarker = Buffer.from(JSON.stringify({ p: "crc-20", op: "deploy", tick: ticker, type: "bonding", max: "2100000000000000", lim: "2100000000000000", leaf: "0", ordi: "0", btc: "1" }));
   const launchSalt = randomBytes(32);
   const vault = buildCrc20AssetVault({ asset: { deploymentTag: crc20DeploymentTag(deployMarker), launchSalt }, guardianXOnly, recoveryProfile, network: bitcoin.networks.regtest });
   const fundedTxid = await rpc.call("sendtoaddress", [walletAddress, 0.002], true);

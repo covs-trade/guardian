@@ -11,9 +11,9 @@ function ceilBps(sats: bigint, bps: bigint): bigint {
   return (sats * bps + 9_999n) / 10_000n;
 }
 
-export function requiredBackingV1(supplyTokens: bigint): bigint {
+export function requiredBacking(supplyTokens: bigint): bigint {
   if (supplyTokens < 0n || supplyTokens > CAP_TOKENS || supplyTokens % LOT_TOKENS !== 0n) {
-    fail("INVALID_SUPPLY", "Cove v1 supply must be whole lots within the cap");
+    fail("INVALID_SUPPLY", "Cove supply must be whole lots within the cap");
   }
   const fullStages = supplyTokens / STAGE_TOKENS;
   const partialLots = (supplyTokens % STAGE_TOKENS) / LOT_TOKENS;
@@ -23,11 +23,19 @@ export function requiredBackingV1(supplyTokens: bigint): bigint {
 }
 
 export function isCoveCurveDeploy(payload: Record<string, unknown>): boolean {
-  return Object.keys(payload).sort().join(",") === "cv,max,op,p,tick,type" &&
+  return Object.keys(payload).sort().join(",") === "btc,leaf,lim,max,op,ordi,p,tick,type" &&
     payload.p === "crc-20" && payload.op === "deploy" &&
     typeof payload.tick === "string" && /^[A-Za-z0-9]{1,16}$/.test(payload.tick) &&
     payload.type === "bonding" && payload.max === CAP_ATOMS.toString() &&
-    payload.cv === "cove-curve-v3";
+    payload.lim === CAP_ATOMS.toString() && payload.leaf === "0" &&
+    payload.ordi === "0" && payload.btc === "1";
+}
+
+export function coveCurveDeployPayload(ticker: string) {
+  if (!/^[A-Za-z0-9]{1,16}$/.test(ticker)) throw new Error("invalid CRC ticker");
+  return { p: "crc-20", op: "deploy", tick: ticker, type: "bonding",
+    max: CAP_ATOMS.toString(), lim: CAP_ATOMS.toString(),
+    leaf: "0", ordi: "0", btc: "1" } as const;
 }
 
 export type CurveState = Readonly<{
@@ -112,7 +120,7 @@ function assertState(state: CurveState): void {
     state.vaultAtoms % LOT_ATOMS !== 0n ||
     state.vaultAnchorSats < 0n ||
     state.vaultSats !==
-      state.vaultAnchorSats + requiredBackingV1(state.circulatingAtoms / ATOMS_PER_TOKEN) ||
+      state.vaultAnchorSats + requiredBacking(state.circulatingAtoms / ATOMS_PER_TOKEN) ||
     !state.vaultOutpoint
   ) {
     fail("INVALID_STATE", "curve supply or backing invariant failed");
@@ -148,7 +156,7 @@ export function quoteBuy(state: CurveState, amountTokens: bigint): BuyQuote {
     operation = "mint";
   }
   const circulatingTokens = state.circulatingAtoms / ATOMS_PER_TOKEN;
-  const gross = requiredBackingV1(circulatingTokens + amountTokens) - requiredBackingV1(circulatingTokens);
+  const gross = requiredBacking(circulatingTokens + amountTokens) - requiredBacking(circulatingTokens);
   if (gross < 1n) fail("ECONOMIC_DUST", "buy must add at least one sat of backing");
   const protocolFee = 5_000n + 10n * (amountTokens / LOT_TOKENS) + ceilBps(gross, 750n);
   const creatorShare = ceilBps(gross, 5_000n);
@@ -179,7 +187,7 @@ export function quoteSell(
   }
   if (payoutDustSats < 0n) fail("INVALID_DUST", "payout dust must be non-negative");
   const circulatingTokens = state.circulatingAtoms / ATOMS_PER_TOKEN;
-  const gross = requiredBackingV1(circulatingTokens) - requiredBackingV1(circulatingTokens - amountTokens);
+  const gross = requiredBacking(circulatingTokens) - requiredBacking(circulatingTokens - amountTokens);
   if (gross < 1n) fail("ECONOMIC_DUST", "sell must remove at least one sat of backing");
   const percentageFee = ceilBps(gross, 750n);
   const protocolFee = percentageFee > 1_000n ? percentageFee : 1_000n;

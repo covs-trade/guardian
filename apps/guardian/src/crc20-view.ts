@@ -1,7 +1,7 @@
 import * as bitcoin from "bitcoinjs-lib";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { requiredBackingV1 } from "@crclaunch/crc20-curve";
+import { isCoveCurveDeploy, requiredBacking } from "@crclaunch/crc20-curve";
 import type { Database } from "@crclaunch/db";
 import type { CrcTrustedSnapshot } from "./crc20-validate.js";
 
@@ -47,10 +47,7 @@ export function parseCrcSnapshotRow(
   const protocolVersion = Number(row.protocol_version);
   if (protocolVersion !== 3)
     throw new Error("CRC registered protocol version is invalid");
-  if (payload.p !== "crc-20" || payload.op !== "deploy" || payload.tick !== ticker ||
-    payload.type !== "bonding" || payload.max !== "2100000000000000" ||
-    payload.cv !== `cove-curve-v${protocolVersion}` ||
-    Object.keys(payload).sort().join(",") !== "cv,max,op,p,tick,type")
+  if (payload.tick !== ticker || !isCoveCurveDeploy(payload))
     throw new Error("CRC launch marker does not match registered asset version");
   const launchSaltHex = stringField(row, "launch_salt_hex");
   if (!hex64.test(launchSaltHex) || /^0+$/.test(launchSaltHex) || launchSaltHex !== row.intent_salt_hex)
@@ -76,7 +73,7 @@ export function parseCrcSnapshotRow(
     throw new Error("CRC curve supply mismatch");
   const circulatingAtoms = mintedAtoms - vaultAtoms;
   const vaultSats = atoms(row, "btc_sats");
-  if (vaultSats !== anchorSats + requiredBackingV1(circulatingAtoms / 100_000_000n))
+  if (vaultSats !== anchorSats + requiredBacking(circulatingAtoms / 100_000_000n))
     throw new Error("CRC vault reserve mismatch");
   const vaultTxid = stringField(row, "vault_txid");
   const vaultVout = Number(row.vault_vout);
