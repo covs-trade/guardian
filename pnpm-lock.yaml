@@ -65,9 +65,18 @@ importers:
       '@crclaunch/cove-wire':
         specifier: workspace:*
         version: link:../../packages/cove-wire
-      '@crclaunch/crc20-curve':
+      '@crclaunch/crc20-adapters':
         specifier: workspace:*
-        version: link:../../packages/crc20-curve
+        version: link:../../packages/crc20-adapters
+      '@crclaunch/crc20-guardian':
+        specifier: workspace:*
+        version: link:../../packages/crc20-guardian
+      '@crclaunch/crc20-protocol':
+        specifier: workspace:*
+        version: link:../../packages/crc20-protocol
+      '@crclaunch/crc20-state':
+        specifier: workspace:*
+        version: link:../../packages/crc20-state
       '@crclaunch/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -495,6 +504,28 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.4)
 
+  packages/crc20-adapters:
+    dependencies:
+      '@crclaunch/crc20-protocol':
+        specifier: workspace:*
+        version: link:../crc20-protocol
+      bitcoinjs-lib:
+        specifier: 6.1.8
+        version: 6.1.8
+      buffer:
+        specifier: ^6.0.3
+        version: 6.0.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.4
+      esbuild:
+        specifier: ^0.21.5
+        version: 0.21.5
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   packages/crc20-curve:
     dependencies:
       '@crclaunch/cove-economics':
@@ -510,6 +541,58 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.4)
+
+  packages/crc20-guardian:
+    dependencies:
+      '@crclaunch/cove-vault':
+        specifier: workspace:*
+        version: link:../cove-vault
+      '@crclaunch/crc20-adapters':
+        specifier: workspace:*
+        version: link:../crc20-adapters
+      '@crclaunch/crc20-protocol':
+        specifier: workspace:*
+        version: link:../crc20-protocol
+      '@crclaunch/crc20-state':
+        specifier: workspace:*
+        version: link:../crc20-state
+      '@crclaunch/db':
+        specifier: workspace:*
+        version: link:../db
+      bitcoinjs-lib:
+        specifier: 6.1.8
+        version: 6.1.8
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@types/pg@8.23.1)(pg@8.23.0)
+
+  packages/crc20-protocol:
+    dependencies:
+      tiny-secp256k1:
+        specifier: ^2.2.3
+        version: 2.2.4
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.20.4
+      esbuild:
+        specifier: ^0.21.5
+        version: 0.21.5
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/crc20-state:
+    dependencies:
+      '@crclaunch/crc20-protocol':
+        specifier: workspace:*
+        version: link:../crc20-protocol
+      '@crclaunch/db':
+        specifier: workspace:*
+        version: link:../db
+      drizzle-orm:
+        specifier: ^0.36.4
+        version: 0.36.4(@types/pg@8.23.1)(pg@8.23.0)
 
   packages/curve:
     devDependencies:
@@ -1568,6 +1651,9 @@ packages:
   base-x@4.0.1:
     resolution: {integrity: sha512-uAZ8x6r6S3aUM9rbHGVOIsR15U/ZSc82b3ymnCPsT45Gk1DDvhDPdIgB5MrhirZWt+5K0EEPQH985kNqZgNPFw==}
 
+  base64-js@1.5.1:
+    resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
+
   bech32@2.0.0:
     resolution: {integrity: sha512-LcknSilhIGatDAsY1ak2I8VtGaHNhgMSYVxFrGLXv+xLHytaKZKcaUJJUE7qmBr7h33o5YQwP55pMI0xmkpJwg==}
 
@@ -1603,6 +1689,9 @@ packages:
 
   buffer-from@1.1.2:
     resolution: {integrity: sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==}
+
+  buffer@6.0.3:
+    resolution: {integrity: sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA==}
 
   cac@6.7.14:
     resolution: {integrity: sha512-b6Ilus+c3RrdDk+JhLKUAQfzzgLEPy6wcXqS7f/xe1EETvsDP6GORG7SFuOs6cID5YkqchW/LXZbX5bc8j7ZcQ==}
@@ -2007,6 +2096,9 @@ packages:
 
   html-escaper@2.0.2:
     resolution: {integrity: sha512-H2iMtd0I4Mt5eYiapRdIDjp+XzelXQ0tFE4JS7YFwFevXXMmOp9myNrUvCg0D6ws8iqkRPBfKHgbwig1SmlLfg==}
+
+  ieee754@1.2.1:
+    resolution: {integrity: sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA==}
 
   ignore@5.3.2:
     resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
@@ -3254,6 +3346,8 @@ snapshots:
 
   base-x@4.0.1: {}
 
+  base64-js@1.5.1: {}
+
   bech32@2.0.0: {}
 
   bip174@2.1.1: {}
@@ -3300,6 +3394,11 @@ snapshots:
       bs58: 5.0.0
 
   buffer-from@1.1.2: {}
+
+  buffer@6.0.3:
+    dependencies:
+      base64-js: 1.5.1
+      ieee754: 1.2.1
 
   cac@6.7.14: {}
 
@@ -3725,6 +3824,8 @@ snapshots:
       function-bind: 1.1.2
 
   html-escaper@2.0.2: {}
+
+  ieee754@1.2.1: {}
 
   ignore@5.3.2: {}
 

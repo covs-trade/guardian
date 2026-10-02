@@ -10,7 +10,9 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY apps ./apps
 COPY packages ./packages
 COPY tsconfig.base.json ./
+COPY crc-core-source-manifest.json ./
 RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @crclaunch/crc20-protocol build && pnpm --filter @crclaunch/crc20-adapters build
 COPY --from=rust-builder /build/packages/cove-simplicity/rust/target/release/cove-simplicity /app/packages/cove-simplicity/rust/target/release/cove-simplicity
 ENV NODE_ENV=production
 EXPOSE 4391

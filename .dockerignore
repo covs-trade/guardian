@@ -4,6 +4,7 @@ node_modules
 **/target
 **/dist
 *.tsbuildinfo
+**/*.tsbuildinfo
 .env
 .env.*
 !.env.example

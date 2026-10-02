@@ -10,12 +10,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src --max-warnings=0",
     "test": "vitest run",
-    "crc:regtest-lifecycle": "tsx src/crc20-regtest-lifecycle.mjs"
+    "crc:regtest-lifecycle": "vitest run src/crc20-service.test.ts"
   },
   "dependencies": {
     "@crclaunch/bitcoin": "workspace:*",
     "@crclaunch/config": "workspace:*",
-    "@crclaunch/crc20-curve": "workspace:*",
     "@crclaunch/cove-app": "workspace:*",
     "@crclaunch/cove-economics": "workspace:*",
     "@crclaunch/cove-guardian": "workspace:*",
@@ -27,7 +26,11 @@
     "bitcoinjs-lib": "^6.1.7",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.36.4",
-    "envalid": "^8.2.0"
+    "envalid": "^8.2.0",
+    "@crclaunch/crc20-protocol": "workspace:*",
+    "@crclaunch/crc20-adapters": "workspace:*",
+    "@crclaunch/crc20-state": "workspace:*",
+    "@crclaunch/crc20-guardian": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

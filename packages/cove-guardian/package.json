@@ -7,7 +7,6 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./crc20": "./src/crc20.ts",
     "./v3": "./src/v3/index.ts"
   },
   "scripts": {
