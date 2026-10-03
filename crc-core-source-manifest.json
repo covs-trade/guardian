@@ -26,7 +26,7 @@
     "packages/crc20-adapters/src/index.ts": "67963901513df0a3ff244b7d1b4b61d0f9315d3165d86490166d603b33cbd368",
     "packages/crc20-adapters/package.json": "89c293607c21e0d6073692f81cba35fa8d58ca197d55de87bbcbdbd5ea3bf548",
     "packages/crc20-state/tsconfig.json": "67fe1217ccdc0b94257febe136c6293b3a9e37860474614cfb1c219f43235c5a",
-    "packages/crc20-state/src/index.ts": "861612405a4e3b9a3dbf0717f5cb97f3b7e522c409046ca023a7bab4730acae4",
+    "packages/crc20-state/src/index.ts": "c079b62c51a6f2b0de2c846754a26f2339361116e7d80fbe1046f87191246177",
     "packages/crc20-state/package.json": "61642fe89fa1d5a403415bff91c4dae3bb9772fa4f91d5d9467d121e72b9ff98",
     "packages/crc20-guardian/tsconfig.json": "67fe1217ccdc0b94257febe136c6293b3a9e37860474614cfb1c219f43235c5a",
     "packages/crc20-guardian/src/verified-parents.ts": "996cfcb72d396c62d5f5fcefde1d0254eb0f98a6362a7d4f9bf4827eabc6f9a6",
