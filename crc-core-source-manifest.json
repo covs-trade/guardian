@@ -38,6 +38,8 @@
     "packages/db/drizzle/meta/0039_snapshot.json": "48253e4908ec53d494d046b2419aacc4d8e5999fdfff2c55021030573f2aadb8",
     "packages/db/drizzle/0040_crc_api.sql": "1059b38c1f51f5ac2412151fcd9da4433541ec787bd2ffd06f3caff726d2a3a2",
     "packages/db/drizzle/meta/0040_snapshot.json": "d3177aa7e9a272cac8f7679d79f78d3eedee6a997a4578791de1523f8bfd67d5",
-    "packages/db/drizzle/meta/_journal.json": "49a745045616a8999c10831b10f08b38124b4889dbf8480e924611fc7cfa3533"
+    "packages/db/drizzle/0041_crc_fresh_reset.sql": "0af6cbef456cdcfa90f475aef5d5489cb2e2e8fbe465a258aea4cb8a54f5ada8",
+    "packages/db/drizzle/meta/0041_snapshot.json": "84cc65db16ba74b5866f1094535293837c04f7ea1fdd9ae4a3b1846a1a87d8fe",
+    "packages/db/drizzle/meta/_journal.json": "06c5abaa9fade98cd7af51bda5027ce4d97a5950b1b424a5d18d14dec1738869"
   }
 }
