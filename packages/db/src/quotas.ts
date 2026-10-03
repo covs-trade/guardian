@@ -3,40 +3,15 @@ import { sql } from "drizzle-orm";
 import type { Database } from "./client.js";
 
 export class CapacityUnavailable extends Error {
-  constructor() {
-    super("Shared capacity unavailable; retry shortly");
-    this.name = "CapacityUnavailable";
-  }
+  constructor() { super("Shared capacity unavailable; retry shortly"); this.name = "CapacityUnavailable"; }
 }
 
-export function providerAccount(config: {
-  url: string;
-  apiKey?: string;
-  user?: string;
-  password?: string;
-}): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify(
-        config.apiKey
-          ? ["api-key", config.apiKey]
-          : [
-              "rpc",
-              new URL(config.url).origin,
-              config.user ?? "",
-              config.password ?? "",
-            ],
-      ),
-    )
-    .digest("hex");
+export function providerAccount(config: { url: string; apiKey?: string; user?: string; password?: string }): string {
+  return createHash("sha256").update(JSON.stringify(config.apiKey ? ["api-key", config.apiKey] :
+    ["rpc", new URL(config.url).origin, config.user ?? "", config.password ?? ""])).digest("hex");
 }
 
-export async function sharedQuota(
-  db: Database,
-  key: string,
-  limit: number,
-  windowMs: number,
-): Promise<boolean> {
+export async function sharedQuota(db: Database, key: string, limit: number, windowMs: number): Promise<boolean> {
   const hash = createHash("sha256").update(key).digest("hex");
   const result = await db.execute(sql`
     insert into cove_api_quotas (key, window_start, count)
@@ -51,57 +26,32 @@ export async function sharedQuota(
 
 type Lane = "worker" | "guardian" | "public";
 type Lease = { id: string; lane: Lane; until: number };
-type State = {
-  rate: number;
-  concurrency: number;
-  next: number;
-  lanes: Partial<Record<Lane, number>>;
-  leases: Lease[];
-};
+type Waiter = Lease & { queuedAt: number };
+type State = { rate: number; concurrency: number; next: number; lanes: Partial<Record<Lane, number>>; leases: Lease[];
+  waiters?: Waiter[]; lastGrant?: Partial<Record<Lane, number>> };
 
-type BudgetRequest = {
-  signal: AbortSignal;
-  resolve: (release: () => Promise<void>) => void;
-  reject: (error: unknown) => void;
-  abort: () => void;
-};
+type BudgetRequest = { signal: AbortSignal; resolve: (release: () => Promise<void>) => void;
+  reject: (error: unknown) => void; abort: () => void };
 
 export class PostgresRpcBudget {
   private queue: BudgetRequest[] = [];
   private running = false;
-  constructor(
-    private readonly db: Database,
-    private readonly account: string,
-    private readonly lane: Lane,
-    private readonly requestsPerSecond = 3,
-    private readonly maxConcurrent = 6,
-  ) {
-    if (
-      !Number.isSafeInteger(requestsPerSecond) ||
-      requestsPerSecond < 3 ||
-      requestsPerSecond > 300 ||
-      !Number.isSafeInteger(maxConcurrent) ||
-      maxConcurrent < 3 ||
-      maxConcurrent > 60
-    )
-      throw new Error("invalid provider budget");
+  constructor(private readonly db: Database, private readonly account: string, private readonly lane: Lane,
+    private readonly requestsPerSecond = 3, private readonly maxConcurrent = 6) {
+    if (!Number.isSafeInteger(requestsPerSecond) || requestsPerSecond < 3 || requestsPerSecond > 300 ||
+      !Number.isSafeInteger(maxConcurrent) || maxConcurrent < 3 || maxConcurrent > 60) throw new Error("invalid provider budget");
   }
 
   async acquire(signal: AbortSignal): Promise<() => Promise<void>> {
     signal.throwIfAborted();
     if (this.queue.length >= 32) throw new CapacityUnavailable();
     return new Promise((resolve, reject) => {
-      const request: BudgetRequest = {
-        signal,
-        resolve,
-        reject,
-        abort: () => {
-          const index = this.queue.indexOf(request);
-          if (index >= 0) this.queue.splice(index, 1);
-          signal.removeEventListener("abort", request.abort);
-          reject(signal.reason);
-        },
-      };
+      const request: BudgetRequest = { signal, resolve, reject, abort: () => {
+        const index = this.queue.indexOf(request);
+        if (index >= 0) this.queue.splice(index, 1);
+        signal.removeEventListener("abort", request.abort);
+        reject(signal.reason);
+      } };
       signal.addEventListener("abort", request.abort, { once: true });
       this.queue.push(request);
       void this.drain();
@@ -117,91 +67,72 @@ export class PostgresRpcBudget {
         if (!request) break;
         try {
           const release = await this.acquireShared(request.signal);
-          if (request.signal.aborted) {
-            await release().catch(() => {});
-            request.reject(request.signal.reason);
-          } else request.resolve(release);
-        } catch (error) {
-          request.reject(error);
-        } finally {
-          request.signal.removeEventListener("abort", request.abort);
-        }
+          if (request.signal.aborted) { await release().catch(() => {}); request.reject(request.signal.reason); }
+          else request.resolve(release);
+        } catch (error) { request.reject(error); }
+        finally { request.signal.removeEventListener("abort", request.abort); }
       }
-    } finally {
-      this.running = false;
-    }
+    } finally { this.running = false; }
   }
 
-  private async acquireShared(
-    signal: AbortSignal,
-  ): Promise<() => Promise<void>> {
+  private async acquireShared(signal: AbortSignal): Promise<() => Promise<void>> {
     const deadline = Date.now() + 8_000;
-    {
+    const id = randomUUID();
+    try {
       while (Date.now() < deadline) {
         signal.throwIfAborted();
-        const id = randomUUID();
         const accepted = await this.db.transaction(async (tx) => {
           await tx.execute(sql`set local lock_timeout = '500ms'`);
           await tx.execute(sql`set local statement_timeout = '1000ms'`);
-          await tx.execute(
-            sql`insert into cove_rpc_budgets (account, state) values (${this.account}, ${JSON.stringify({ rate: this.requestsPerSecond, concurrency: this.maxConcurrent, next: 0, lanes: {}, leases: [] })}::jsonb) on conflict do nothing`,
-          );
-          const result =
-            await tx.execute(sql`select state, extract(epoch from clock_timestamp()) * 1000 as now
+          await tx.execute(sql`insert into cove_rpc_budgets (account, state) values (${this.account}, ${JSON.stringify({ rate: this.requestsPerSecond, concurrency: this.maxConcurrent, next: 0, lanes: {}, leases: [] })}::jsonb) on conflict do nothing`);
+          const result = await tx.execute(sql`select state, extract(epoch from clock_timestamp()) * 1000 as now
             from cove_rpc_budgets where account = ${this.account} for update`);
           const row = result.rows[0]!;
           const now = Number(row.now);
           const state = row.state as State;
-          if (
-            state.rate !== this.requestsPerSecond ||
-            state.concurrency !== this.maxConcurrent
-          )
-            throw new Error(
-              "provider budget configuration differs across services",
-            );
+          if (state.rate !== this.requestsPerSecond || state.concurrency !== this.maxConcurrent) throw new Error("provider budget configuration differs across services");
           state.leases = state.leases.filter((lease) => lease.until > now);
-          if (
-            state.next > now ||
-            (state.lanes[this.lane] ?? 0) > now ||
-            state.leases.length >= this.maxConcurrent ||
-            state.leases.filter((lease) => lease.lane === this.lane).length >=
-              Math.floor(this.maxConcurrent / 3)
-          )
+          const waiters = state.waiters = (state.waiters ?? []).filter(waiter => waiter.until > now);
+          if (!waiters.some(waiter => waiter.id === id)) {
+            if (waiters.length >= 128) throw new CapacityUnavailable();
+            waiters.push({ id, lane: this.lane, queuedAt: now, until: now + Math.max(1, deadline - Date.now()) });
+          }
+          const lastGrant = state.lastGrant ??= {};
+          // Oldest-served eligible lane wins, then FIFO within that lane. Idle
+          // lanes reserve concurrency but do not waste provider request quota.
+          const eligible = waiters.filter(waiter => state.leases.filter(lease => lease.lane === waiter.lane).length < Math.floor(this.maxConcurrent / 3));
+          eligible.sort((a, b) => (lastGrant[a.lane] ?? 0) - (lastGrant[b.lane] ?? 0) || a.queuedAt - b.queuedAt);
+          if (state.next > now || state.leases.length >= this.maxConcurrent || eligible[0]?.id !== id) {
+            await tx.execute(sql`update cove_rpc_budgets set state = ${JSON.stringify(state)}::jsonb where account = ${this.account}`);
             return false;
+          }
           state.next = now + Math.ceil(1_050 / this.requestsPerSecond);
-          state.lanes[this.lane] =
-            now + Math.ceil(3_000 / this.requestsPerSecond);
+          lastGrant[this.lane] = now;
+          state.waiters = waiters.filter(waiter => waiter.id !== id);
+          // Retain the old field for a coordinated rollout across older clients.
+          state.lanes[this.lane] = now + Math.ceil(3_000 / this.requestsPerSecond);
           state.leases.push({ id, lane: this.lane, until: now + 30_000 });
-          await tx.execute(
-            sql`update cove_rpc_budgets set state = ${JSON.stringify(state)}::jsonb where account = ${this.account}`,
-          );
+          await tx.execute(sql`update cove_rpc_budgets set state = ${JSON.stringify(state)}::jsonb where account = ${this.account}`);
           return true;
         });
-        if (accepted)
-          return async () => {
-            await this.db
-              .execute(sql`update cove_rpc_budgets set state = jsonb_set(state, '{leases}',
+        if (accepted) return async () => {
+          await this.db.execute(sql`update cove_rpc_budgets set state = jsonb_set(state, '{leases}',
             coalesce((select jsonb_agg(lease) from jsonb_array_elements(state->'leases') lease where lease->>'id' <> ${id}), '[]'::jsonb))
             where account = ${this.account}`);
-          };
+        };
         await new Promise<void>((resolve, reject) => {
-          const abort = () => {
-            clearTimeout(timer);
-            signal.removeEventListener("abort", abort);
-            reject(signal.reason);
-          };
-          const timer = setTimeout(
-            () => {
-              signal.removeEventListener("abort", abort);
-              resolve();
-            },
-            75 + Math.floor(Math.random() * 75),
-          );
+          const abort = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); reject(signal.reason); };
+          const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 75 + Math.floor(Math.random() * 75));
           signal.addEventListener("abort", abort, { once: true });
           if (signal.aborted) abort();
         });
       }
       throw new CapacityUnavailable();
+    } finally {
+      // Abort/timeout must not leave a phantom lane waiting for its turn.
+      await this.db.execute(sql`update cove_rpc_budgets set state = jsonb_set(state, '{waiters}',
+        coalesce((select jsonb_agg(waiter) from jsonb_array_elements(coalesce(state->'waiters', '[]'::jsonb)) waiter where waiter->>'id' <> ${id}), '[]'::jsonb))
+        where account = ${this.account}`).catch(() => {});
     }
   }
 }
