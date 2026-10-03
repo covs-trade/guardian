@@ -23,7 +23,7 @@
     "packages/crc20-adapters/tsconfig.json": "51b75e7b164174170273bb7393059b173dabdcb9763872aa4dbd39c4a18807b0",
     "packages/crc20-adapters/src/guardian.ts": "33785d5e381dc495a4bdb481e0c0170dca0d65fccef815aa745f14b480c9195c",
     "packages/crc20-adapters/src/psbt.ts": "c86894db8e37ce473d1c1818f3b395320b9fdb1bb9cacbcbc9f01411462fbe47",
-    "packages/crc20-adapters/src/index.ts": "b1c198519dda1adf0204df172baa94a4fd01c212e81343aec7b30dd783deb99b",
+    "packages/crc20-adapters/src/index.ts": "acc969c608b0857db88c63c29a169715cc6bc41c7fb2bf9ceb00b1105783e29c",
     "packages/crc20-adapters/package.json": "89c293607c21e0d6073692f81cba35fa8d58ca197d55de87bbcbdbd5ea3bf548",
     "packages/crc20-state/tsconfig.json": "67fe1217ccdc0b94257febe136c6293b3a9e37860474614cfb1c219f43235c5a",
     "packages/crc20-state/src/index.ts": "861612405a4e3b9a3dbf0717f5cb97f3b7e522c409046ca023a7bab4730acae4",
